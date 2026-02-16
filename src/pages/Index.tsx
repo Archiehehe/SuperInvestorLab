@@ -1,12 +1,30 @@
-// Update this page (the content is just a fallback if you fail to update the page)
+import { Header } from "@/components/Header";
+import { SingleStockTab } from "@/components/SingleStockTab";
+import { ScreenerTab } from "@/components/ScreenerTab";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const Index = () => {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background">
-      <div className="text-center">
-        <h1 className="mb-4 text-4xl font-bold">Welcome to Your Blank App</h1>
-        <p className="text-xl text-muted-foreground">Start building your amazing project here!</p>
-      </div>
+    <div className="min-h-screen bg-background">
+      <Header />
+      <main className="max-w-7xl mx-auto px-6 py-8">
+        <Tabs defaultValue="single" className="space-y-8">
+          <TabsList className="bg-muted border border-border">
+            <TabsTrigger value="single" className="font-mono text-sm data-[state=active]:bg-background data-[state=active]:text-primary">
+              Single Stock
+            </TabsTrigger>
+            <TabsTrigger value="screener" className="font-mono text-sm data-[state=active]:bg-background data-[state=active]:text-primary">
+              S&P 500 Screener
+            </TabsTrigger>
+          </TabsList>
+          <TabsContent value="single">
+            <SingleStockTab />
+          </TabsContent>
+          <TabsContent value="screener">
+            <ScreenerTab />
+          </TabsContent>
+        </Tabs>
+      </main>
     </div>
   );
 };
