@@ -1,1 +1,10 @@
 project_id = "ibtbezlkzpjayufalylb"
+
+[functions.fetch-stock-data]
+verify_jwt = false
+
+[functions.evaluate-stock]
+verify_jwt = false
+
+[functions.search-tickers]
+verify_jwt = false
