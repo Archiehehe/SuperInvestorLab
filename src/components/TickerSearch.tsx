@@ -67,7 +67,8 @@ export function TickerSearch({ value, onChange, disabled }: TickerSearchProps) {
             <button
               key={r.symbol}
               className="w-full px-4 py-3 text-left hover:bg-muted flex items-center justify-between transition-colors"
-              onClick={() => {
+              onMouseDown={(e) => {
+                e.preventDefault(); // prevent input blur before selection fires
                 setQuery(r.symbol);
                 onChange(r.symbol);
                 setIsOpen(false);
