@@ -13,62 +13,86 @@ serve(async (req) => {
     const FMP_API_KEY = Deno.env.get("FMP_API_KEY");
     if (!FMP_API_KEY) throw new Error("FMP_API_KEY is not configured");
 
-    // Fetch profile and key metrics in parallel
-    const [profileRes, ratiosRes, growthRes, keyMetricsRes] = await Promise.all([
-      fetch(`https://financialmodelingprep.com/api/v3/profile/${ticker}?apikey=${FMP_API_KEY}`),
-      fetch(`https://financialmodelingprep.com/api/v3/ratios-ttm/${ticker}?apikey=${FMP_API_KEY}`),
-      fetch(`https://financialmodelingprep.com/api/v3/financial-growth/${ticker}?limit=1&apikey=${FMP_API_KEY}`),
-      fetch(`https://financialmodelingprep.com/api/v3/key-metrics-ttm/${ticker}?apikey=${FMP_API_KEY}`),
+    const BASE = "https://financialmodelingprep.com/stable";
+
+    const [profileRes, ratiosRes, keyMetricsRes, growthRes] = await Promise.all([
+      fetch(`${BASE}/profile?symbol=${ticker}&apikey=${FMP_API_KEY}`),
+      fetch(`${BASE}/ratios?symbol=${ticker}&period=ttm&limit=1&apikey=${FMP_API_KEY}`),
+      fetch(`${BASE}/key-metrics?symbol=${ticker}&period=ttm&limit=1&apikey=${FMP_API_KEY}`),
+      fetch(`${BASE}/financial-growth?symbol=${ticker}&period=annual&limit=1&apikey=${FMP_API_KEY}`),
     ]);
 
-    const [profile] = await profileRes.json();
-    const [ratios] = await ratiosRes.json();
-    const growth = (await growthRes.json())?.[0] || {};
-    const [keyMetrics] = await keyMetricsRes.json();
+    const safeArray = (data: any): any[] => (Array.isArray(data) ? data : []);
+    const safeFirst = (data: any): any => safeArray(data)[0] || {};
 
-    if (!profile) {
+    const profileData = await profileRes.json();
+    const ratiosData = await ratiosRes.json();
+    const keyMetricsData = await keyMetricsRes.json();
+    const growthData = await growthRes.json();
+
+    const profile = safeFirst(profileData);
+    const ratios = safeFirst(ratiosData);
+    const km = safeFirst(keyMetricsData);
+    const growth = safeFirst(growthData);
+
+    if (!profile || !profile.symbol) {
       return new Response(JSON.stringify({ error: `Ticker "${ticker}" not found` }), {
         status: 404,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const r = (v: any) => (v !== undefined && v !== null && !isNaN(v) ? Number(Number(v).toFixed(4)) : null);
+    const r = (v: any) => {
+      if (v === undefined || v === null || (typeof v === 'number' && isNaN(v))) return null;
+      const n = Number(v);
+      if (isNaN(n)) return null;
+      // Return 0 as null for coverage-type metrics that shouldn't be 0
+      return Number(n.toFixed(4));
+    };
+
+    // interestCoverage = 0 means no data (FMP returns 0 when N/A)
+    const rCoverage = (v: any) => {
+      const val = r(v);
+      return val === 0 ? null : val;
+    };
 
     const metrics = {
       ticker: profile.symbol,
       companyName: profile.companyName,
       price: r(profile.price),
-      marketCap: r(profile.mktCap),
+      marketCap: r(profile.marketCap ?? profile.mktCap),
       sector: profile.sector || "N/A",
       industry: profile.industry || "N/A",
-      exchange: profile.exchangeShortName || "N/A",
+      exchange: profile.exchange || profile.exchangeShortName || "N/A",
       logo: profile.image || null,
-      pe: r(ratios?.peRatioTTM),
-      forwardPe: r(profile.forwardPE) || r(ratios?.forwardPeRatioTTM),
-      pb: r(ratios?.priceToBookRatioTTM),
-      ps: r(ratios?.priceToSalesRatioTTM),
-      evToEbitda: r(keyMetrics?.enterpriseValueOverEBITDATTM),
-      evToRevenue: r(keyMetrics?.evToSalesTTM),
-      pegRatio: r(ratios?.pegRatioTTM),
-      priceToFcf: r(ratios?.priceToFreeCashFlowsRatioTTM),
-      earningsYield: r(keyMetrics?.earningsYieldTTM),
-      roe: r(ratios?.returnOnEquityTTM),
-      roa: r(ratios?.returnOnAssetsTTM),
-      roic: r(keyMetrics?.roicTTM),
-      grossMargin: r(ratios?.grossProfitMarginTTM),
-      operatingMargin: r(ratios?.operatingProfitMarginTTM),
-      netMargin: r(ratios?.netProfitMarginTTM),
-      revenueGrowth: r(growth?.revenueGrowth),
-      epsGrowth: r(growth?.epsgrowth),
-      fcfGrowth: r(growth?.freeCashFlowGrowth),
-      debtToEquity: r(ratios?.debtEquityRatioTTM),
-      currentRatio: r(ratios?.currentRatioTTM),
-      quickRatio: r(ratios?.quickRatioTTM),
-      interestCoverage: r(ratios?.interestCoverageTTM),
-      dividendYield: r(ratios?.dividendYielTTM),
-      payoutRatio: r(ratios?.payoutRatioTTM),
-      fcfYield: r(keyMetrics?.freeCashFlowYieldTTM),
+      // Valuation — exact stable API field names confirmed from logs
+      pe: r(ratios.priceToEarningsRatio),
+      forwardPe: r(ratios.forwardPriceToEarningsRatio ?? profile.forwardPE),
+      pb: r(ratios.priceToBookRatio),
+      ps: r(ratios.priceToSalesRatio),
+      evToEbitda: r(km.evToEBITDA ?? km.enterpriseValueMultiple),
+      evToRevenue: r(km.evToSales),
+      pegRatio: r(ratios.priceToEarningsGrowthRatio),
+      priceToFcf: r(ratios.priceToFreeCashFlowRatio),
+      earningsYield: r(km.earningsYield),
+      // Quality & Growth — roe/roa come from keyMetrics, not ratios
+      roe: r(km.returnOnEquity),
+      roa: r(km.returnOnAssets),
+      roic: r(km.returnOnInvestedCapital),
+      grossMargin: r(ratios.grossProfitMargin),
+      operatingMargin: r(ratios.operatingProfitMargin),
+      netMargin: r(ratios.netProfitMargin),
+      revenueGrowth: r(growth.revenueGrowth),
+      epsGrowth: r(growth.epsgrowth ?? growth.epsGrowth),
+      fcfGrowth: r(growth.freeCashFlowGrowth),
+      // Balance Sheet & Dividends
+      debtToEquity: r(ratios.debtToEquityRatio),
+      currentRatio: r(ratios.currentRatio),
+      quickRatio: r(ratios.quickRatio),
+      interestCoverage: rCoverage(ratios.interestCoverageRatio),
+      dividendYield: r(ratios.dividendYield),
+      payoutRatio: r(ratios.dividendPayoutRatio),
+      fcfYield: r(km.freeCashFlowYield),
       beta: r(profile.beta),
     };
 
