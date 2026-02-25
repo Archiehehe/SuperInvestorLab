@@ -22,13 +22,17 @@ serve(async (req) => {
       fetch(`${BASE}/financial-growth?symbol=${ticker}&period=annual&limit=1&apikey=${FMP_API_KEY}`),
     ]);
 
+    const safeJson = async (res: Response): Promise<any> => {
+      const text = await res.text();
+      try { return JSON.parse(text); } catch { console.warn("Non-JSON response:", text.slice(0, 120)); return []; }
+    };
     const safeArray = (data: any): any[] => (Array.isArray(data) ? data : []);
     const safeFirst = (data: any): any => safeArray(data)[0] || {};
 
-    const profileData = await profileRes.json();
-    const ratiosData = await ratiosRes.json();
-    const keyMetricsData = await keyMetricsRes.json();
-    const growthData = await growthRes.json();
+    const profileData = await safeJson(profileRes);
+    const ratiosData = await safeJson(ratiosRes);
+    const keyMetricsData = await safeJson(keyMetricsRes);
+    const growthData = await safeJson(growthRes);
 
     const profile = safeFirst(profileData);
     const ratios = safeFirst(ratiosData);
