@@ -367,69 +367,75 @@ const SP500_FALLBACK = [
   { symbol: "KALU", name: "Kaiser Aluminum Corporation", sector: "Basic Materials" },
 ];
 
+const YAHOO_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (compatible; SuperInvestorLab/1.0)",
+  "Accept": "application/json",
+};
+
+const fetchWithTimeout = async (url: string, timeoutMs = 8000): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: YAHOO_HEADERS,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const { query } = await req.json();
-    const FMP_API_KEY = Deno.env.get("FMP_API_KEY");
-    if (!FMP_API_KEY) throw new Error("FMP_API_KEY is not configured");
 
     if (query === "__sp500__") {
-      // Try FMP API first, fall back to hardcoded list
-      try {
-        const res = await fetch(`https://financialmodelingprep.com/api/v3/sp500_constituent?apikey=${FMP_API_KEY}`);
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          const tickers = data.map((d: any) => ({
-            symbol: d.symbol,
-            name: d.name,
-            sector: d.sector,
-          }));
-          return new Response(JSON.stringify(tickers), {
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
-      } catch {
-        // Fall through to hardcoded list
-      }
-      // Return hardcoded fallback
       return new Response(JSON.stringify(SP500_FALLBACK), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Try FMP search first
-    let results: Array<{ symbol: string; name: string; exchange?: string }> = [];
-    try {
-      const res = await fetch(`https://financialmodelingprep.com/api/v3/search?query=${encodeURIComponent(query)}&limit=10&apikey=${FMP_API_KEY}`);
-      const data = await res.json();
-      if (Array.isArray(data) && data.length > 0) {
-        results = data.map((d: any) => ({
-          symbol: d.symbol,
-          name: d.name || d.companyName,
-          exchange: d.exchange || d.exchangeShortName,
-        }));
-      } else {
-        // FMP returned error or empty — log and fall through to local search
-        if (!Array.isArray(data)) {
-          console.warn("FMP search error, using local fallback:", JSON.stringify(data).slice(0, 150));
-        }
-      }
-    } catch (e) {
-      console.warn("FMP search failed, using local fallback:", e);
+    const cleanQuery = typeof query === "string" ? query.trim() : "";
+    if (!cleanQuery) {
+      return new Response(JSON.stringify([]), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
-    // If FMP returned nothing, search the hardcoded list
+    let results: Array<{ symbol: string; name: string; exchange?: string }> = [];
+
+    try {
+      const res = await fetchWithTimeout(
+        `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=10&newsCount=0&lang=en-US&region=US`
+      );
+      const data = await res.json();
+      const quotes = Array.isArray(data?.quotes) ? data.quotes : [];
+
+      results = quotes
+        .filter((q: any) => q?.symbol && q?.quoteType === "EQUITY")
+        .slice(0, 10)
+        .map((q: any) => ({
+          symbol: String(q.symbol).replace(/-/g, "."),
+          name: q.shortname || q.longname || q.symbol,
+          exchange: q.exchDisp || q.exchange || "US",
+        }));
+    } catch (e) {
+      console.warn("Yahoo search failed, using local fallback:", e);
+    }
+
     if (results.length === 0) {
-      const q = query.toUpperCase();
+      const q = cleanQuery.toUpperCase();
       results = SP500_FALLBACK.filter(
         (s) => s.symbol.includes(q) || s.name.toUpperCase().includes(q)
-      ).slice(0, 10).map((s) => ({
-        symbol: s.symbol,
-        name: s.name,
-        exchange: "US",
-      }));
+      )
+        .slice(0, 10)
+        .map((s) => ({
+          symbol: s.symbol,
+          name: s.name,
+          exchange: "US",
+        }));
     }
 
     return new Response(JSON.stringify(results), {
