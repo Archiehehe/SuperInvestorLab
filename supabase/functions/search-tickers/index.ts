@@ -399,19 +399,38 @@ serve(async (req) => {
       });
     }
 
-    const res = await fetch(`https://financialmodelingprep.com/stable/search-symbol?query=${encodeURIComponent(query)}&limit=10&apikey=${FMP_API_KEY}`);
-    const data = await res.json();
-    if (!Array.isArray(data)) {
-      console.error("Search API response:", JSON.stringify(data));
-      return new Response(JSON.stringify([]), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+    // Try FMP search first
+    let results: Array<{ symbol: string; name: string; exchange?: string }> = [];
+    try {
+      const res = await fetch(`https://financialmodelingprep.com/api/v3/search?query=${encodeURIComponent(query)}&limit=10&apikey=${FMP_API_KEY}`);
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        results = data.map((d: any) => ({
+          symbol: d.symbol,
+          name: d.name || d.companyName,
+          exchange: d.exchange || d.exchangeShortName,
+        }));
+      } else {
+        // FMP returned error or empty — log and fall through to local search
+        if (!Array.isArray(data)) {
+          console.warn("FMP search error, using local fallback:", JSON.stringify(data).slice(0, 150));
+        }
+      }
+    } catch (e) {
+      console.warn("FMP search failed, using local fallback:", e);
     }
-    const results = data.map((d: any) => ({
-      symbol: d.symbol,
-      name: d.name || d.companyName,
-      exchange: d.exchange || d.exchangeShortName,
-    }));
+
+    // If FMP returned nothing, search the hardcoded list
+    if (results.length === 0) {
+      const q = query.toUpperCase();
+      results = SP500_FALLBACK.filter(
+        (s) => s.symbol.includes(q) || s.name.toUpperCase().includes(q)
+      ).slice(0, 10).map((s) => ({
+        symbol: s.symbol,
+        name: s.name,
+        exchange: "US",
+      }));
+    }
 
     return new Response(JSON.stringify(results), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },
