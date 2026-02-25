@@ -5,13 +5,45 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-// Detect FMP error responses (rate limit, plan restrictions, etc.)
-function checkFmpError(data: any): string | null {
-  if (data && typeof data === "object" && !Array.isArray(data)) {
-    if (data["Error Message"]) return data["Error Message"];
-    if (data["error"]) return data["error"];
-  }
+const YAHOO_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (compatible; SuperInvestorLab/1.0)",
+  "Accept": "application/json",
+};
+
+function toNumber(value: any): number | null {
+  const raw = typeof value === "object" && value !== null && "raw" in value ? value.raw : value;
+  if (raw === undefined || raw === null || raw === "") return null;
+  const n = Number(raw);
+  if (Number.isNaN(n)) return null;
+  return Number(n.toFixed(4));
+}
+
+function toStringValue(value: any): string | null {
+  if (typeof value === "object" && value !== null && "fmt" in value) return String(value.fmt);
+  if (typeof value === "object" && value !== null && "raw" in value) return String(value.raw);
+  if (typeof value === "string") return value;
   return null;
+}
+
+function normalizeDebtToEquity(value: any): number | null {
+  const n = toNumber(value);
+  if (n === null) return null;
+  // Yahoo often returns debt/equity as a percentage (e.g. 145.6) while UI expects ratio (1.456)
+  return n > 20 ? Number((n / 100).toFixed(4)) : n;
+}
+
+function normalizeTicker(input: string): string {
+  return input.trim().toUpperCase().replace(/\./g, "-");
+}
+
+function buildLogoUrl(website: string | null): string | null {
+  if (!website) return null;
+  try {
+    const url = new URL(website.startsWith("http") ? website : `https://${website}`);
+    return `https://logo.clearbit.com/${url.hostname}`;
+  } catch {
+    return null;
+  }
 }
 
 serve(async (req) => {
@@ -19,120 +51,91 @@ serve(async (req) => {
 
   try {
     const { ticker: rawTicker } = await req.json();
-    const FMP_API_KEY = Deno.env.get("FMP_API_KEY");
-    if (!FMP_API_KEY) throw new Error("FMP_API_KEY is not configured");
-
-    // FMP uses dashes instead of dots for class shares (BRK.B -> BRK-B)
-    const ticker = rawTicker.replace(/\./g, "-");
-
-    const BASE = "https://financialmodelingprep.com/api/v3";
-
-    const fetchWithTimeout = async (url: string, timeoutMs = 8000): Promise<Response> => {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        return await fetch(url, { signal: controller.signal });
-      } finally {
-        clearTimeout(timer);
-      }
-    };
-
-    const safeJson = async (res: Response): Promise<any> => {
-      const text = await res.text();
-      try { return JSON.parse(text); } catch { console.warn("Non-JSON response:", text.slice(0, 120)); return []; }
-    };
-
-    // Fetch profile first to check for rate limiting
-    const profileRes = await fetchWithTimeout(`${BASE}/profile/${ticker}?apikey=${FMP_API_KEY}`);
-    const profileData = await safeJson(profileRes);
-
-    // Check if FMP returned an error (rate limit, plan restriction, etc.)
-    const fmpError = checkFmpError(profileData);
-    if (fmpError) {
-      console.error("FMP API error:", fmpError);
-      return new Response(JSON.stringify({ error: "Financial data provider rate limit reached. Please wait a moment and try again." }), {
-        status: 429,
+    if (!rawTicker || typeof rawTicker !== "string") {
+      return new Response(JSON.stringify({ error: "Ticker is required" }), {
+        status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const safeArray = (data: any): any[] => (Array.isArray(data) ? data : []);
-    const safeFirst = (data: any): any => safeArray(data)[0] || {};
-    const profile = safeFirst(profileData);
+    const ticker = normalizeTicker(rawTicker);
+    const modules = [
+      "price",
+      "summaryDetail",
+      "summaryProfile",
+      "defaultKeyStatistics",
+      "financialData",
+    ].join(",");
 
-    if (!profile || !profile.symbol) {
+    const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modules}`;
+
+    const res = await fetch(url, { headers: YAHOO_HEADERS });
+    const data = await res.json();
+
+    const yahooError = data?.quoteSummary?.error;
+    if (yahooError) {
       return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found` }), {
         status: 404,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    // Now fetch remaining data in parallel
-    const [ratiosRes, keyMetricsRes, growthRes] = await Promise.all([
-      fetchWithTimeout(`${BASE}/ratios-ttm/${ticker}?apikey=${FMP_API_KEY}`),
-      fetchWithTimeout(`${BASE}/key-metrics-ttm/${ticker}?apikey=${FMP_API_KEY}`),
-      fetchWithTimeout(`${BASE}/financial-growth/${ticker}?limit=1&apikey=${FMP_API_KEY}`),
-    ]);
+    const profile = data?.quoteSummary?.result?.[0];
+    if (!profile?.price?.symbol) {
+      return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found` }), {
+        status: 404,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
-    const ratiosData = await safeJson(ratiosRes);
-    const keyMetricsData = await safeJson(keyMetricsRes);
-    const growthData = await safeJson(growthRes);
+    const price = profile.price ?? {};
+    const summaryDetail = profile.summaryDetail ?? {};
+    const summaryProfile = profile.summaryProfile ?? {};
+    const keyStats = profile.defaultKeyStatistics ?? {};
+    const financial = profile.financialData ?? {};
 
-    // If secondary endpoints are rate-limited, we still return profile data with nulls
-    const ratios = checkFmpError(ratiosData) ? {} : safeFirst(ratiosData);
-    const km = checkFmpError(keyMetricsData) ? {} : safeFirst(keyMetricsData);
-    const growth = checkFmpError(growthData) ? {} : safeFirst(growthData);
-
-    const r = (v: any) => {
-      if (v === undefined || v === null || (typeof v === 'number' && isNaN(v))) return null;
-      const n = Number(v);
-      if (isNaN(n)) return null;
-      return Number(n.toFixed(4));
-    };
-
-    const rCoverage = (v: any) => {
-      const val = r(v);
-      return val === 0 ? null : val;
-    };
+    const marketCap = toNumber(price.marketCap);
+    const freeCashFlow = toNumber(financial.freeCashflow);
+    const pe = toNumber(summaryDetail.trailingPE);
 
     const metrics = {
-      ticker: profile.symbol,
-      companyName: profile.companyName,
-      price: r(profile.price),
-      marketCap: r(profile.mktCap),
-      sector: profile.sector || "N/A",
-      industry: profile.industry || "N/A",
-      exchange: profile.exchangeShortName || profile.exchange || "N/A",
-      logo: profile.image || null,
+      ticker: toStringValue(price.symbol) ?? ticker,
+      companyName: toStringValue(price.longName) ?? toStringValue(price.shortName) ?? rawTicker.toUpperCase(),
+      price: toNumber(price.regularMarketPrice),
+      marketCap,
+      sector: toStringValue(summaryProfile.sector) ?? "N/A",
+      industry: toStringValue(summaryProfile.industry) ?? "N/A",
+      exchange: toStringValue(price.exchangeName) ?? toStringValue(price.fullExchangeName) ?? "N/A",
+      logo: buildLogoUrl(toStringValue(summaryProfile.website)),
       // Valuation
-      pe: r(ratios.peRatioTTM ?? ratios.priceEarningsRatioTTM),
-      forwardPe: r(profile.forwardPE ?? ratios.forwardPERatioTTM),
-      pb: r(ratios.priceToBookRatioTTM ?? ratios.pbRatioTTM),
-      ps: r(ratios.priceToSalesRatioTTM ?? ratios.psRatioTTM),
-      evToEbitda: r(km.enterpriseValueOverEBITDATTM ?? km.evToEbitdaTTM),
-      evToRevenue: r(km.evToSalesTTM),
-      pegRatio: r(ratios.pegRatioTTM ?? ratios.priceEarningsToGrowthRatioTTM),
-      priceToFcf: r(ratios.priceToFreeCashFlowsRatioTTM ?? ratios.pfcfRatioTTM),
-      earningsYield: r(km.earningsYieldTTM),
+      pe,
+      forwardPe: toNumber(summaryDetail.forwardPE),
+      pb: toNumber(keyStats.priceToBook),
+      ps: toNumber(summaryDetail.priceToSalesTrailing12Months),
+      evToEbitda: toNumber(keyStats.enterpriseToEbitda),
+      evToRevenue: toNumber(keyStats.enterpriseToRevenue),
+      pegRatio: toNumber(keyStats.pegRatio),
+      priceToFcf: marketCap && freeCashFlow && freeCashFlow > 0 ? Number((marketCap / freeCashFlow).toFixed(4)) : null,
+      earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
       // Quality & Growth
-      roe: r(ratios.returnOnEquityTTM ?? km.roeTTM),
-      roa: r(ratios.returnOnAssetsTTM ?? km.roaTTM),
-      roic: r(ratios.returnOnCapitalEmployedTTM ?? km.roicTTM),
-      grossMargin: r(ratios.grossProfitMarginTTM),
-      operatingMargin: r(ratios.operatingProfitMarginTTM),
-      netMargin: r(ratios.netProfitMarginTTM),
-      revenueGrowth: r(growth.revenueGrowth),
-      epsGrowth: r(growth.epsgrowth ?? growth.epsGrowth),
-      fcfGrowth: r(growth.freeCashFlowGrowth),
+      roe: toNumber(financial.returnOnEquity),
+      roa: toNumber(financial.returnOnAssets),
+      roic: null,
+      grossMargin: toNumber(financial.grossMargins),
+      operatingMargin: toNumber(financial.operatingMargins),
+      netMargin: toNumber(financial.profitMargins),
+      revenueGrowth: toNumber(financial.revenueGrowth),
+      epsGrowth: toNumber(financial.earningsGrowth),
+      fcfGrowth: null,
       // Balance Sheet & Dividends
-      debtToEquity: r(ratios.debtEquityRatioTTM ?? ratios.debtToEquityTTM),
-      currentRatio: r(ratios.currentRatioTTM),
-      quickRatio: r(ratios.quickRatioTTM),
-      interestCoverage: rCoverage(ratios.interestCoverageTTM),
-      dividendYield: r(ratios.dividendYieldTTM ?? ratios.dividendYielTTM),
-      payoutRatio: r(ratios.payoutRatioTTM ?? ratios.dividendPayoutRatioTTM),
-      fcfYield: r(km.freeCashFlowYieldTTM),
-      beta: r(profile.beta),
+      debtToEquity: normalizeDebtToEquity(financial.debtToEquity),
+      currentRatio: toNumber(financial.currentRatio),
+      quickRatio: toNumber(financial.quickRatio),
+      interestCoverage: null,
+      dividendYield: toNumber(summaryDetail.dividendYield),
+      payoutRatio: toNumber(keyStats.payoutRatio),
+      fcfYield: marketCap && freeCashFlow ? Number((freeCashFlow / marketCap).toFixed(4)) : null,
+      beta: toNumber(keyStats.beta),
     };
 
     return new Response(JSON.stringify(metrics), {
