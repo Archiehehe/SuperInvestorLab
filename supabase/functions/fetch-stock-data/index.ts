@@ -5,6 +5,15 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+// Detect FMP error responses (rate limit, plan restrictions, etc.)
+function checkFmpError(data: any): string | null {
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    if (data["Error Message"]) return data["Error Message"];
+    if (data["error"]) return data["error"];
+  }
+  return null;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
@@ -16,40 +25,63 @@ serve(async (req) => {
     // FMP uses dashes instead of dots for class shares (BRK.B -> BRK-B)
     const ticker = rawTicker.replace(/\./g, "-");
 
-    // Use v3 API endpoints (available on free/starter plans, unlike /stable)
     const BASE = "https://financialmodelingprep.com/api/v3";
 
-    const [profileRes, ratiosRes, keyMetricsRes, growthRes] = await Promise.all([
-      fetch(`${BASE}/profile/${ticker}?apikey=${FMP_API_KEY}`),
-      fetch(`${BASE}/ratios-ttm/${ticker}?apikey=${FMP_API_KEY}`),
-      fetch(`${BASE}/key-metrics-ttm/${ticker}?apikey=${FMP_API_KEY}`),
-      fetch(`${BASE}/financial-growth/${ticker}?limit=1&apikey=${FMP_API_KEY}`),
-    ]);
+    const fetchWithTimeout = async (url: string, timeoutMs = 8000): Promise<Response> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        return await fetch(url, { signal: controller.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+    };
 
     const safeJson = async (res: Response): Promise<any> => {
       const text = await res.text();
       try { return JSON.parse(text); } catch { console.warn("Non-JSON response:", text.slice(0, 120)); return []; }
     };
+
+    // Fetch profile first to check for rate limiting
+    const profileRes = await fetchWithTimeout(`${BASE}/profile/${ticker}?apikey=${FMP_API_KEY}`);
+    const profileData = await safeJson(profileRes);
+
+    // Check if FMP returned an error (rate limit, plan restriction, etc.)
+    const fmpError = checkFmpError(profileData);
+    if (fmpError) {
+      console.error("FMP API error:", fmpError);
+      return new Response(JSON.stringify({ error: "Financial data provider rate limit reached. Please wait a moment and try again." }), {
+        status: 429,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const safeArray = (data: any): any[] => (Array.isArray(data) ? data : []);
     const safeFirst = (data: any): any => safeArray(data)[0] || {};
-
-    const profileData = await safeJson(profileRes);
-    const ratiosData = await safeJson(ratiosRes);
-    const keyMetricsData = await safeJson(keyMetricsRes);
-    const growthData = await safeJson(growthRes);
-
     const profile = safeFirst(profileData);
-    const ratios = safeFirst(ratiosData);
-    const km = safeFirst(keyMetricsData);
-    const growth = safeFirst(growthData);
 
     if (!profile || !profile.symbol) {
-      console.error(`Ticker "${ticker}" profile empty. Profile response:`, JSON.stringify(profileData).slice(0, 200));
       return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found` }), {
         status: 404,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
+
+    // Now fetch remaining data in parallel
+    const [ratiosRes, keyMetricsRes, growthRes] = await Promise.all([
+      fetchWithTimeout(`${BASE}/ratios-ttm/${ticker}?apikey=${FMP_API_KEY}`),
+      fetchWithTimeout(`${BASE}/key-metrics-ttm/${ticker}?apikey=${FMP_API_KEY}`),
+      fetchWithTimeout(`${BASE}/financial-growth/${ticker}?limit=1&apikey=${FMP_API_KEY}`),
+    ]);
+
+    const ratiosData = await safeJson(ratiosRes);
+    const keyMetricsData = await safeJson(keyMetricsRes);
+    const growthData = await safeJson(growthRes);
+
+    // If secondary endpoints are rate-limited, we still return profile data with nulls
+    const ratios = checkFmpError(ratiosData) ? {} : safeFirst(ratiosData);
+    const km = checkFmpError(keyMetricsData) ? {} : safeFirst(keyMetricsData);
+    const growth = checkFmpError(growthData) ? {} : safeFirst(growthData);
 
     const r = (v: any) => {
       if (v === undefined || v === null || (typeof v === 'number' && isNaN(v))) return null;
@@ -63,7 +95,6 @@ serve(async (req) => {
       return val === 0 ? null : val;
     };
 
-    // v3 TTM endpoints use different field names (with TTM suffix)
     const metrics = {
       ticker: profile.symbol,
       companyName: profile.companyName,
