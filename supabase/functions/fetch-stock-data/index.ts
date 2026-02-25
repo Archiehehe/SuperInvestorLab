@@ -9,9 +9,12 @@ serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
-    const { ticker } = await req.json();
+    const { ticker: rawTicker } = await req.json();
     const FMP_API_KEY = Deno.env.get("FMP_API_KEY");
     if (!FMP_API_KEY) throw new Error("FMP_API_KEY is not configured");
+
+    // FMP uses dashes instead of dots for class shares (BRK.B -> BRK-B)
+    const ticker = rawTicker.replace(/\./g, "-");
 
     const BASE = "https://financialmodelingprep.com/stable";
 

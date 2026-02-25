@@ -52,7 +52,9 @@ Debt/Equity: ${metrics.debtToEquity ?? 'N/A'} | Current Ratio: ${metrics.current
 Interest Coverage: ${metrics.interestCoverage ?? 'N/A'} | Dividend Yield: ${metrics.dividendYield ? (metrics.dividendYield * 100).toFixed(2) + '%' : 'N/A'}
 Payout Ratio: ${metrics.payoutRatio ? (metrics.payoutRatio * 100).toFixed(2) + '%' : 'N/A'} | FCF Yield: ${metrics.fcfYield ? (metrics.fcfYield * 100).toFixed(2) + '%' : 'N/A'} | Beta: ${metrics.beta ?? 'N/A'}`;
 
-      const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
+      let response: Response | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${LOVABLE_API_KEY}`,
@@ -97,21 +99,30 @@ Payout Ratio: ${metrics.payoutRatio ? (metrics.payoutRatio * 100).toFixed(2) + '
           }],
           tool_choice: { type: "function", function: { name: "suggest_evaluation" } },
         }),
-      });
+        });
 
-      if (!response.ok) {
-        if (response.status === 429) {
+        if (response!.status === 429 && attempt < 2) {
+          const wait = (attempt + 1) * 2000;
+          console.warn(`Rate limited for ${investor.name}, retrying in ${wait}ms...`);
+          await new Promise(r => setTimeout(r, wait));
+          continue;
+        }
+        break;
+      }
+
+      if (!response!.ok) {
+        if (response!.status === 429) {
           return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again later." }), {
             status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
-        if (response.status === 402) {
+        if (response!.status === 402) {
           return new Response(JSON.stringify({ error: "AI credits exhausted. Please add funds in Settings." }), {
             status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
-        const errText = await response.text();
-        console.error(`AI error for ${investor.name}:`, response.status, errText);
+        const errText = await response!.text();
+        console.error(`AI error for ${investor.name}:`, response!.status, errText);
         // Return a fallback evaluation
         results.push({
           investorId: investor.id,
@@ -128,7 +139,7 @@ Payout Ratio: ${metrics.payoutRatio ? (metrics.payoutRatio * 100).toFixed(2) + '
         continue;
       }
 
-      const aiData = await response.json();
+      const aiData = await response!.json();
       const toolCall = aiData.choices?.[0]?.message?.tool_calls?.[0];
       
       if (!toolCall) {
