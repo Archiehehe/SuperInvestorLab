@@ -48,9 +48,9 @@ export function ScreenerTab() {
       const investors = selectedInvestors.map((id) => INVESTORS.find((i) => i.id === id)!);
       const screenerResults: ScreenerResult[] = [];
 
-      // Process in batches of 5
-      for (let i = 0; i < tickers.length; i += 5) {
-        const batch = tickers.slice(i, i + 5);
+      // Process in batches of 10
+      for (let i = 0; i < tickers.length; i += 10) {
+        const batch = tickers.slice(i, i + 10);
         const batchPromises = batch.map(async (t) => {
           try {
             const metrics = await fetchStockData(t.symbol);
@@ -90,7 +90,7 @@ export function ScreenerTab() {
         const valid = batchResults.filter(Boolean) as ScreenerResult[];
         screenerResults.push(...valid);
         setResults([...screenerResults]);
-        setProgress({ current: Math.min(i + 5, tickers.length), total: tickers.length });
+        setProgress({ current: Math.min(i + 10, tickers.length), total: tickers.length });
       }
 
       toast({ title: "Screener complete", description: `Analyzed ${screenerResults.length} stocks.` });
