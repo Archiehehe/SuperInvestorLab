@@ -115,8 +115,10 @@ function growthFromSeries(timeseries: any, type: string): number | null {
   for (const item of valid) {
     if (item.date <= targetDate) prior = item;
   }
-  if (!prior?.value) return null;
-  return Number(((latest.value - prior.value) / Math.abs(prior.value)).toFixed(4));
+  const latestValue = latest.value as number;
+  const priorValue = prior.value as number;
+  if (!priorValue) return null;
+  return Number(((latestValue - priorValue) / Math.abs(priorValue)).toFixed(4));
 }
 
 function safeRatio(numerator: number | null, denominator: number | null): number | null {
