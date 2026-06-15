@@ -5,17 +5,86 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
+function metricSignal(value: number | null | undefined, pass: (n: number) => boolean, warn: (n: number) => boolean) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "warn";
+  if (pass(value)) return "pass";
+  if (warn(value)) return "warn";
+  return "fail";
+}
+
+function formatValue(value: number | null | undefined, type: "ratio" | "percent" | "money" = "ratio") {
+  if (value === null || value === undefined || Number.isNaN(value)) return "N/A";
+  if (type === "percent") return `${(value * 100).toFixed(2)}%`;
+  if (type === "money") return `$${value.toFixed(2)}`;
+  return value.toFixed(2);
+}
+
+function fallbackEvaluation(metrics: any, investor: any, reason = "AI service temporarily unavailable") {
+  const checklist = [
+    {
+      criterion: "Valuation discipline",
+      signal: metricSignal(metrics.pe, (n) => n > 0 && n <= 20, (n) => n > 0 && n <= 35),
+      value: `P/E ${formatValue(metrics.pe)}, P/B ${formatValue(metrics.pb)}, P/S ${formatValue(metrics.ps)}`,
+      explanation: "Compares current valuation multiples with conservative value-investing thresholds.",
+    },
+    {
+      criterion: "Business quality",
+      signal: metricSignal(metrics.roe, (n) => n >= 0.15, (n) => n >= 0.08),
+      value: `ROE ${formatValue(metrics.roe, "percent")}, ROA ${formatValue(metrics.roa, "percent")}`,
+      explanation: "Higher returns on equity and assets suggest stronger economics and capital efficiency.",
+    },
+    {
+      criterion: "Cash generation",
+      signal: metricSignal(metrics.fcfYield, (n) => n >= 0.05, (n) => n >= 0.02),
+      value: `FCF yield ${formatValue(metrics.fcfYield, "percent")}, P/FCF ${formatValue(metrics.priceToFcf)}`,
+      explanation: "Free cash flow is used as a practical proxy for owner earnings and downside support.",
+    },
+    {
+      criterion: "Balance-sheet resilience",
+      signal: metricSignal(metrics.debtToEquity, (n) => n <= 1, (n) => n <= 2.5),
+      value: `Debt/equity ${formatValue(metrics.debtToEquity)}, current ratio ${formatValue(metrics.currentRatio)}`,
+      explanation: "Lower leverage and adequate liquidity reduce financial fragility.",
+    },
+    {
+      criterion: "Growth profile",
+      signal: metricSignal(metrics.revenueGrowth ?? metrics.epsGrowth, (n) => n >= 0.08, (n) => n >= 0),
+      value: `Revenue growth ${formatValue(metrics.revenueGrowth, "percent")}, EPS growth ${formatValue(metrics.epsGrowth, "percent")}`,
+      explanation: "Positive growth improves compatibility with quality, GARP, and compounding styles.",
+    },
+  ];
+  const passCount = checklist.filter((c) => c.signal === "pass").length;
+  const warnCount = checklist.filter((c) => c.signal === "warn").length;
+  const failCount = checklist.filter((c) => c.signal === "fail").length;
+  const compatibilityScore = Math.round(((passCount * 1 + warnCount * 0.5) / checklist.length) * 100);
+  return {
+    investorId: investor.id,
+    investorName: investor.fullName,
+    philosophy: investor.philosophy,
+    overallSignal: compatibilityScore >= 70 ? "pass" : compatibilityScore >= 40 ? "warn" : "fail",
+    overallComment: `${reason}; using rules-based ${investor.name} compatibility screen.`,
+    compatibilityScore,
+    checklist,
+    passCount,
+    warnCount,
+    failCount,
+  };
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const { metrics, investors } = await req.json();
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) throw new Error("LOVABLE_API_KEY is not configured");
 
     const results = [];
 
     for (const investor of investors) {
+      if (!LOVABLE_API_KEY) {
+        results.push(fallbackEvaluation(metrics, investor, "AI key is not configured"));
+        continue;
+      }
+
       const systemPrompt = `You are an expert financial analyst specializing in the investment philosophy of ${investor.fullName} (${investor.style}).
 
 Your task: Evaluate the given stock metrics against ${investor.fullName}'s investment philosophy and produce a structured checklist.
@@ -112,30 +181,16 @@ Payout Ratio: ${metrics.payoutRatio ? (metrics.payoutRatio * 100).toFixed(2) + '
 
       if (!response!.ok) {
         if (response!.status === 429) {
-          return new Response(JSON.stringify({ error: "Rate limit exceeded. Please try again later." }), {
-            status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
+          results.push(fallbackEvaluation(metrics, investor, "AI rate limit reached"));
+          continue;
         }
         if (response!.status === 402) {
-          return new Response(JSON.stringify({ error: "AI credits exhausted. Please add funds in Settings." }), {
-            status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
+          results.push(fallbackEvaluation(metrics, investor, "AI credits unavailable"));
+          continue;
         }
         const errText = await response!.text();
         console.error(`AI error for ${investor.name}:`, response!.status, errText);
-        // Return a fallback evaluation
-        results.push({
-          investorId: investor.id,
-          investorName: investor.fullName,
-          philosophy: investor.philosophy,
-          overallSignal: "warn",
-          overallComment: "Unable to evaluate — AI service temporarily unavailable",
-          compatibilityScore: 50,
-          checklist: [],
-          passCount: 0,
-          warnCount: 0,
-          failCount: 0,
-        });
+        results.push(fallbackEvaluation(metrics, investor));
         continue;
       }
 
