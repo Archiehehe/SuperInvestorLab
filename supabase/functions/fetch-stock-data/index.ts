@@ -10,6 +10,29 @@ const YAHOO_HEADERS = {
   "Accept": "application/json",
 };
 
+const FUNDAMENTAL_TYPES = [
+  "annualMarketCap",
+  "trailingPeRatio",
+  "trailingPegRatio",
+  "trailingTotalRevenue",
+  "trailingNetIncome",
+  "trailingGrossProfit",
+  "trailingOperatingIncome",
+  "trailingFreeCashFlow",
+  "trailingEBITDA",
+  "trailingDilutedEPS",
+  "trailingInterestExpense",
+  "trailingCashDividendsPaid",
+  "quarterlyTotalDebt",
+  "quarterlyLongTermDebt",
+  "quarterlyStockholdersEquity",
+  "quarterlyTotalAssets",
+  "quarterlyCurrentAssets",
+  "quarterlyCurrentLiabilities",
+  "quarterlyCashAndCashEquivalents",
+  "quarterlyInventory",
+].join(",");
+
 function toNumber(value: any): number | null {
   const raw = typeof value === "object" && value !== null && "raw" in value ? value.raw : value;
   if (raw === undefined || raw === null || raw === "") return null;
@@ -34,6 +57,70 @@ function normalizeDebtToEquity(value: any): number | null {
 
 function normalizeTicker(input: string): string {
   return input.trim().toUpperCase().replace(/\./g, "-");
+}
+
+function displayTicker(input: string, normalized: string): string {
+  return input.includes(".") ? input.trim().toUpperCase() : normalized.replace(/-/g, ".");
+}
+
+function okJson(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+async function fetchJson(url: string): Promise<any | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 9000);
+  try {
+    const res = await fetch(url, { headers: YAHOO_HEADERS, signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.warn("stock data provider request failed:", e);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function latestReported(timeseries: any, type: string): number | null {
+  const rows = timeseries?.result;
+  if (!Array.isArray(rows)) return null;
+  const row = rows.find((item: any) => item?.meta?.type?.includes(type));
+  const values = row?.[type];
+  if (!Array.isArray(values)) return null;
+  for (let i = values.length - 1; i >= 0; i--) {
+    const raw = values[i]?.reportedValue?.raw;
+    const n = toNumber(raw);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function growthFromSeries(timeseries: any, type: string): number | null {
+  const rows = timeseries?.result;
+  if (!Array.isArray(rows)) return null;
+  const row = rows.find((item: any) => item?.meta?.type?.includes(type));
+  const values = Array.isArray(row?.[type]) ? row[type] : [];
+  const valid = values
+    .map((v: any) => ({ date: v?.asOfDate ? Date.parse(v.asOfDate) : 0, value: toNumber(v?.reportedValue?.raw) }))
+    .filter((v: any) => v.value !== null && v.value !== 0)
+    .sort((a: any, b: any) => a.date - b.date);
+  if (valid.length < 2) return null;
+  const latest = valid[valid.length - 1];
+  const targetDate = latest.date - 31536000000;
+  let prior = valid[0];
+  for (const item of valid) {
+    if (item.date <= targetDate) prior = item;
+  }
+  if (!prior?.value) return null;
+  return Number(((latest.value - prior.value) / Math.abs(prior.value)).toFixed(4));
+}
+
+function safeRatio(numerator: number | null, denominator: number | null): number | null {
+  if (numerator === null || denominator === null || denominator === 0) return null;
+  return Number((numerator / denominator).toFixed(4));
 }
 
 function buildLogoUrl(website: string | null): string | null {
