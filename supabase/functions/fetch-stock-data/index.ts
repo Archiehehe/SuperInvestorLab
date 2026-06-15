@@ -23,6 +23,7 @@ const FUNDAMENTAL_TYPES = [
   "trailingDilutedEPS",
   "trailingInterestExpense",
   "trailingCashDividendsPaid",
+  "quarterlyDilutedAverageShares",
   "quarterlyTotalDebt",
   "quarterlyLongTermDebt",
   "quarterlyStockholdersEquity",
@@ -162,10 +163,10 @@ serve(async (req) => {
     const fundamentalsUrl = `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(ticker)}?type=${FUNDAMENTAL_TYPES}&period1=${fiveYearsAgo}&period2=${now}`;
     const fundamentals = await fetchJson(fundamentalsUrl);
 
-    const price = toNumber(meta.regularMarketPrice) ?? 0;
+    const currentPrice = toNumber(meta.regularMarketPrice) ?? 0;
     const shares = latestReported(fundamentals?.timeseries, "quarterlyDilutedAverageShares");
     const annualMarketCap = latestReported(fundamentals?.timeseries, "annualMarketCap");
-    const marketCap = annualMarketCap ?? (shares && price ? Number((shares * price).toFixed(2)) : null);
+    const marketCap = annualMarketCap ?? (shares && currentPrice ? Number((shares * currentPrice).toFixed(2)) : null);
     const revenue = latestReported(fundamentals?.timeseries, "trailingTotalRevenue");
     const netIncome = latestReported(fundamentals?.timeseries, "trailingNetIncome");
     const grossProfit = latestReported(fundamentals?.timeseries, "trailingGrossProfit");
@@ -183,13 +184,13 @@ serve(async (req) => {
     const cash = latestReported(fundamentals?.timeseries, "quarterlyCashAndCashEquivalents");
     const inventory = latestReported(fundamentals?.timeseries, "quarterlyInventory");
     const enterpriseValue = marketCap && totalDebt !== null && cash !== null ? marketCap + totalDebt - cash : null;
-    const pe = latestReported(fundamentals?.timeseries, "trailingPeRatio") ?? (eps && price ? safeRatio(price, eps) : null);
+    const pe = latestReported(fundamentals?.timeseries, "trailingPeRatio") ?? (eps && currentPrice ? safeRatio(currentPrice, eps) : null);
     const payoutRatio = netIncome && dividendsPaid ? safeRatio(Math.abs(dividendsPaid), netIncome) : null;
 
     const metrics = {
       ticker: displayTicker(rawTicker, toStringValue(meta.symbol) ?? ticker),
       companyName: toStringValue(meta.longName) ?? toStringValue(meta.shortName) ?? rawTicker.toUpperCase(),
-      price: toNumber(price.regularMarketPrice),
+      price: currentPrice,
       marketCap,
       sector: "N/A",
       industry: toStringValue(meta.instrumentType) ?? "Equity",
