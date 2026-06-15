@@ -5,236 +5,245 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const YAHOO_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (compatible; SuperInvestorLab/1.0)",
-  "Accept": "application/json",
-};
+const UA = { "User-Agent": "SuperInvestorLab/1.0 (research@superinvestorlab.app)", "Accept": "application/json" };
 
-const FUNDAMENTAL_TYPES = [
-  "annualMarketCap",
-  "trailingPeRatio",
-  "trailingPegRatio",
-  "trailingTotalRevenue",
-  "trailingNetIncome",
-  "trailingGrossProfit",
-  "trailingOperatingIncome",
-  "trailingFreeCashFlow",
-  "trailingEBITDA",
-  "trailingDilutedEPS",
-  "trailingInterestExpense",
-  "trailingCashDividendsPaid",
-  "quarterlyDilutedAverageShares",
-  "quarterlyTotalDebt",
-  "quarterlyLongTermDebt",
-  "quarterlyStockholdersEquity",
-  "quarterlyTotalAssets",
-  "quarterlyCurrentAssets",
-  "quarterlyCurrentLiabilities",
-  "quarterlyCashAndCashEquivalents",
-  "quarterlyInventory",
-].join(",");
+// -------- caches (per cold start) --------
+let TICKER_MAP: Record<string, { cik: string; name: string }> | null = null;
 
-function toNumber(value: any): number | null {
-  const raw = typeof value === "object" && value !== null && "raw" in value ? value.raw : value;
-  if (raw === undefined || raw === null || raw === "") return null;
-  const n = Number(raw);
-  if (Number.isNaN(n)) return null;
-  return Number(n.toFixed(4));
-}
-
-function toStringValue(value: any): string | null {
-  if (typeof value === "object" && value !== null && "fmt" in value) return String(value.fmt);
-  if (typeof value === "object" && value !== null && "raw" in value) return String(value.raw);
-  if (typeof value === "string") return value;
-  return null;
-}
-
-function normalizeDebtToEquity(value: any): number | null {
-  const n = toNumber(value);
-  if (n === null) return null;
-  // Yahoo often returns debt/equity as a percentage (e.g. 145.6) while UI expects ratio (1.456)
-  return n > 20 ? Number((n / 100).toFixed(4)) : n;
-}
-
-function normalizeTicker(input: string): string {
-  return input.trim().toUpperCase().replace(/\./g, "-");
-}
-
-function displayTicker(input: string, normalized: string): string {
-  return input.includes(".") ? input.trim().toUpperCase() : normalized.replace(/-/g, ".");
-}
-
-function okJson(body: unknown) {
-  return new Response(JSON.stringify(body), {
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
-}
-
-async function fetchJson(url: string): Promise<any | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 9000);
+async function loadTickerMap(): Promise<Record<string, { cik: string; name: string }>> {
+  if (TICKER_MAP) return TICKER_MAP;
   try {
-    const res = await fetch(url, { headers: YAHOO_HEADERS, signal: controller.signal });
-    if (!res.ok) return null;
-    return await res.json();
+    const r = await fetch("https://www.sec.gov/files/company_tickers.json", { headers: UA });
+    const j = await r.json();
+    const map: Record<string, { cik: string; name: string }> = {};
+    for (const k of Object.keys(j)) {
+      const row = j[k];
+      const cik = String(row.cik_str).padStart(10, "0");
+      map[String(row.ticker).toUpperCase()] = { cik, name: row.title };
+    }
+    TICKER_MAP = map;
+    return map;
   } catch (e) {
-    console.warn("stock data provider request failed:", e);
+    console.warn("ticker map load failed:", e);
+    return {};
+  }
+}
+
+async function fetchJson(url: string, headers: Record<string, string> = UA, timeoutMs = 9000): Promise<any | null> {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { headers, signal: c.signal });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (e) {
+    console.warn("request failed:", url, e);
     return null;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(t);
   }
 }
 
-function latestReported(timeseries: any, type: string): number | null {
-  const rows = timeseries?.result;
-  if (!Array.isArray(rows)) return null;
-  const row = rows.find((item: any) => item?.meta?.type?.includes(type));
-  const values = row?.[type];
-  if (!Array.isArray(values)) return null;
-  for (let i = values.length - 1; i >= 0; i--) {
-    const raw = values[i]?.reportedValue?.raw;
-    const n = toNumber(raw);
-    if (n !== null) return n;
+// -------- EDGAR helpers --------
+type FactEntry = { val: number; fy: number; fp: string; form: string; end: string; filed: string };
+
+function getFacts(companyFacts: any, ...concepts: string[]): FactEntry[] | null {
+  const usgaap = companyFacts?.facts?.["us-gaap"] ?? {};
+  for (const c of concepts) {
+    const node = usgaap[c];
+    if (!node) continue;
+    const units = node.units;
+    const key = units?.USD ? "USD" : units?.shares ? "shares" : units?.["USD/shares"] ? "USD/shares" : Object.keys(units ?? {})[0];
+    if (!key) continue;
+    const arr: FactEntry[] = units[key];
+    if (Array.isArray(arr) && arr.length) return arr;
   }
   return null;
 }
 
-function growthFromSeries(timeseries: any, type: string): number | null {
-  const rows = timeseries?.result;
-  if (!Array.isArray(rows)) return null;
-  const row = rows.find((item: any) => item?.meta?.type?.includes(type));
-  const values = Array.isArray(row?.[type]) ? row[type] : [];
-  const valid = values
-    .map((v: any) => ({ date: v?.asOfDate ? Date.parse(v.asOfDate) : 0, value: toNumber(v?.reportedValue?.raw) }))
-    .filter((v: any) => v.value !== null && v.value !== 0)
-    .sort((a: any, b: any) => a.date - b.date);
-  if (valid.length < 2) return null;
-  const latest = valid[valid.length - 1];
-  const targetDate = latest.date - 31536000000;
-  let prior = valid[0];
-  for (const item of valid) {
-    if (item.date <= targetDate) prior = item;
-  }
-  const latestValue = latest.value as number;
-  const priorValue = prior.value as number;
-  if (!priorValue) return null;
-  return Number(((latestValue - priorValue) / Math.abs(priorValue)).toFixed(4));
+function latestAnnual(facts: FactEntry[] | null): FactEntry | null {
+  if (!facts) return null;
+  const annual = facts.filter((f) => f.form === "10-K" && f.fp === "FY");
+  if (annual.length) return annual.sort((a, b) => (a.end > b.end ? 1 : -1)).pop()!;
+  return facts.slice().sort((a, b) => (a.end > b.end ? 1 : -1)).pop() ?? null;
 }
 
-function safeRatio(numerator: number | null, denominator: number | null): number | null {
-  if (numerator === null || denominator === null || denominator === 0) return null;
-  return Number((numerator / denominator).toFixed(4));
+function priorAnnual(facts: FactEntry[] | null, currentFy: number): FactEntry | null {
+  if (!facts) return null;
+  const target = facts.filter((f) => f.form === "10-K" && f.fp === "FY" && f.fy === currentFy - 1);
+  if (target.length) return target.sort((a, b) => (a.end > b.end ? 1 : -1)).pop()!;
+  return null;
 }
 
-function buildLogoUrl(website: string | null): string | null {
-  if (!website) return null;
-  try {
-    const url = new URL(website.startsWith("http") ? website : `https://${website}`);
-    return `https://logo.clearbit.com/${url.hostname}`;
-  } catch {
-    return null;
-  }
+function latestAny(facts: FactEntry[] | null): FactEntry | null {
+  if (!facts || !facts.length) return null;
+  return facts.slice().sort((a, b) => (a.end > b.end ? 1 : -1)).pop() ?? null;
 }
 
+function val(f: FactEntry | null): number | null { return f ? Number(f.val) : null; }
+function safe(n: number | null, d: number | null): number | null {
+  if (n === null || d === null || d === 0) return null;
+  return Number((n / d).toFixed(4));
+}
+function growth(curr: number | null, prev: number | null): number | null {
+  if (curr === null || prev === null || prev === 0) return null;
+  return Number(((curr - prev) / Math.abs(prev)).toFixed(4));
+}
+
+// -------- Yahoo price fallback --------
+async function fetchYahooQuote(ticker: string): Promise<{ price: number | null; name: string | null; exchange: string | null }> {
+  const t = ticker.replace(/\./g, "-");
+  const d = await fetchJson(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}?range=1d&interval=1d`, UA);
+  const m = d?.chart?.result?.[0]?.meta;
+  if (!m) return { price: null, name: null, exchange: null };
+  return {
+    price: typeof m.regularMarketPrice === "number" ? m.regularMarketPrice : null,
+    name: m.longName ?? m.shortName ?? null,
+    exchange: m.fullExchangeName ?? m.exchangeName ?? null,
+  };
+}
+
+// -------- main --------
 serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const { ticker: rawTicker } = await req.json();
     if (!rawTicker || typeof rawTicker !== "string") {
-      return new Response(JSON.stringify({ error: "Ticker is required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      return new Response(JSON.stringify({ error: "Ticker is required" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    const ticker = rawTicker.trim().toUpperCase().replace(/-/g, ".");
+    const lookupKey = ticker.replace(/\./g, "-");
+    const tickerMap = await loadTickerMap();
+    const entry = tickerMap[ticker] ?? tickerMap[lookupKey] ?? tickerMap[ticker.replace(/\./g, "")];
+
+    // Price (Yahoo) and EDGAR (parallel)
+    const [yahoo, submissions, companyFacts] = await Promise.all([
+      fetchYahooQuote(ticker),
+      entry ? fetchJson(`https://data.sec.gov/submissions/CIK${entry.cik}.json`, UA) : Promise.resolve(null),
+      entry ? fetchJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${entry.cik}.json`, UA) : Promise.resolve(null),
+    ]);
+
+    if (!entry && !yahoo.price) {
+      return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found in SEC EDGAR or market data` }), {
+        status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const ticker = normalizeTicker(rawTicker);
-    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?range=1d&interval=1d`;
-    const chartData = await fetchJson(chartUrl);
-    const meta = chartData?.chart?.result?.[0]?.meta;
+    const price = yahoo.price ?? 0;
 
-    if (!meta?.symbol || !toNumber(meta.regularMarketPrice)) {
-      return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found` }), {
-        status: 404,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    // EDGAR concepts
+    const revF = getFacts(companyFacts, "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "SalesRevenueNet");
+    const niF = getFacts(companyFacts, "NetIncomeLoss");
+    const gpF = getFacts(companyFacts, "GrossProfit");
+    const oiF = getFacts(companyFacts, "OperatingIncomeLoss");
+    const ocfF = getFacts(companyFacts, "NetCashProvidedByUsedInOperatingActivities");
+    const capexF = getFacts(companyFacts, "PaymentsToAcquirePropertyPlantAndEquipment");
+    const assetsF = getFacts(companyFacts, "Assets");
+    const equityF = getFacts(companyFacts, "StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest");
+    const cashF = getFacts(companyFacts, "CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents");
+    const ltDebtF = getFacts(companyFacts, "LongTermDebt", "LongTermDebtNoncurrent");
+    const stDebtF = getFacts(companyFacts, "DebtCurrent", "ShortTermBorrowings", "LongTermDebtCurrent");
+    const sharesF = getFacts(companyFacts, "CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding");
+    const epsF = getFacts(companyFacts, "EarningsPerShareDiluted", "EarningsPerShareBasic");
+    const caF = getFacts(companyFacts, "AssetsCurrent");
+    const clF = getFacts(companyFacts, "LiabilitiesCurrent");
+    const invF = getFacts(companyFacts, "InventoryNet");
+    const intExpF = getFacts(companyFacts, "InterestExpense");
+    const divF = getFacts(companyFacts, "PaymentsOfDividendsCommonStock", "PaymentsOfDividends");
 
-    const now = Math.floor(Date.now() / 1000);
-    const fiveYearsAgo = now - 60 * 60 * 24 * 365 * 5;
-    const fundamentalsUrl = `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(ticker)}?type=${FUNDAMENTAL_TYPES}&period1=${fiveYearsAgo}&period2=${now}`;
-    const fundamentals = await fetchJson(fundamentalsUrl);
+    const revLatest = latestAnnual(revF);
+    const revPrior = revLatest ? priorAnnual(revF, revLatest.fy) : null;
+    const niLatest = latestAnnual(niF);
+    const niPrior = niLatest ? priorAnnual(niF, niLatest.fy) : null;
+    const epsLatest = latestAnnual(epsF);
+    const epsPrior = epsLatest ? priorAnnual(epsF, epsLatest.fy) : null;
 
-    const currentPrice = toNumber(meta.regularMarketPrice) ?? 0;
-    const shares = latestReported(fundamentals?.timeseries, "quarterlyDilutedAverageShares");
-    const annualMarketCap = latestReported(fundamentals?.timeseries, "annualMarketCap");
-    const marketCap = annualMarketCap ?? (shares && currentPrice ? Number((shares * currentPrice).toFixed(2)) : null);
-    const revenue = latestReported(fundamentals?.timeseries, "trailingTotalRevenue");
-    const netIncome = latestReported(fundamentals?.timeseries, "trailingNetIncome");
-    const grossProfit = latestReported(fundamentals?.timeseries, "trailingGrossProfit");
-    const operatingIncome = latestReported(fundamentals?.timeseries, "trailingOperatingIncome");
-    const freeCashFlow = latestReported(fundamentals?.timeseries, "trailingFreeCashFlow");
-    const ebitda = latestReported(fundamentals?.timeseries, "trailingEBITDA");
-    const eps = latestReported(fundamentals?.timeseries, "trailingDilutedEPS");
-    const interestExpense = latestReported(fundamentals?.timeseries, "trailingInterestExpense");
-    const dividendsPaid = latestReported(fundamentals?.timeseries, "trailingCashDividendsPaid");
-    const totalDebt = latestReported(fundamentals?.timeseries, "quarterlyTotalDebt");
-    const equity = latestReported(fundamentals?.timeseries, "quarterlyStockholdersEquity");
-    const assets = latestReported(fundamentals?.timeseries, "quarterlyTotalAssets");
-    const currentAssets = latestReported(fundamentals?.timeseries, "quarterlyCurrentAssets");
-    const currentLiabilities = latestReported(fundamentals?.timeseries, "quarterlyCurrentLiabilities");
-    const cash = latestReported(fundamentals?.timeseries, "quarterlyCashAndCashEquivalents");
-    const inventory = latestReported(fundamentals?.timeseries, "quarterlyInventory");
-    const enterpriseValue = marketCap && totalDebt !== null && cash !== null ? marketCap + totalDebt - cash : null;
-    const pe = latestReported(fundamentals?.timeseries, "trailingPeRatio") ?? (eps && currentPrice ? safeRatio(currentPrice, eps) : null);
-    const payoutRatio = netIncome && dividendsPaid ? safeRatio(Math.abs(dividendsPaid), netIncome) : null;
+    const revenue = val(revLatest);
+    const netIncome = val(niLatest);
+    const grossProfit = val(latestAnnual(gpF));
+    const operatingIncome = val(latestAnnual(oiF));
+    const ocf = val(latestAnnual(ocfF));
+    const capex = val(latestAnnual(capexF));
+    const fcf = ocf !== null && capex !== null ? ocf - capex : ocf;
+    const fcfPrior = (() => {
+      const o = ocfF && latestAnnual(ocfF) ? priorAnnual(ocfF, latestAnnual(ocfF)!.fy) : null;
+      const c = capexF && latestAnnual(capexF) ? priorAnnual(capexF, latestAnnual(capexF)!.fy) : null;
+      if (!o) return null;
+      return Number(o.val) - (c ? Number(c.val) : 0);
+    })();
+
+    const assets = val(latestAny(assetsF));
+    const equity = val(latestAny(equityF));
+    const cash = val(latestAny(cashF)) ?? 0;
+    const ltDebt = val(latestAny(ltDebtF)) ?? 0;
+    const stDebt = val(latestAny(stDebtF)) ?? 0;
+    const totalDebt = ltDebt + stDebt;
+    const sharesOut = val(latestAny(sharesF));
+    const currentAssets = val(latestAny(caF));
+    const currentLiab = val(latestAny(clF));
+    const inventory = val(latestAny(invF)) ?? 0;
+    const interestExp = val(latestAnnual(intExpF));
+    const dividends = val(latestAnnual(divF));
+    const eps = val(epsLatest);
+
+    const marketCap = sharesOut && price ? Number((sharesOut * price).toFixed(2)) : null;
+    const ev = marketCap !== null ? marketCap + totalDebt - cash : null;
+    const ebitda = operatingIncome; // proxy when D&A not isolated
+    const pe = eps && eps > 0 ? Number((price / eps).toFixed(2)) : null;
+
+    // sector via SIC description from submissions
+    const sicDesc = submissions?.sicDescription ?? null;
 
     const metrics = {
-      ticker: displayTicker(rawTicker, toStringValue(meta.symbol) ?? ticker),
-      companyName: toStringValue(meta.longName) ?? toStringValue(meta.shortName) ?? rawTicker.toUpperCase(),
-      price: currentPrice,
+      ticker,
+      companyName: entry?.name ?? yahoo.name ?? ticker,
+      price,
       marketCap,
-      sector: "N/A",
-      industry: toStringValue(meta.instrumentType) ?? "Equity",
-      exchange: toStringValue(meta.fullExchangeName) ?? toStringValue(meta.exchangeName) ?? "N/A",
+      sector: sicDesc ?? "N/A",
+      industry: sicDesc ?? "N/A",
+      exchange: submissions?.exchanges?.[0] ?? yahoo.exchange ?? "N/A",
       logo: null,
       // Valuation
       pe,
       forwardPe: null,
-      pb: safeRatio(marketCap, equity),
-      ps: safeRatio(marketCap, revenue),
-      evToEbitda: safeRatio(enterpriseValue, ebitda),
-      evToRevenue: safeRatio(enterpriseValue, revenue),
-      pegRatio: latestReported(fundamentals?.timeseries, "trailingPegRatio"),
-      priceToFcf: freeCashFlow && freeCashFlow > 0 ? safeRatio(marketCap, freeCashFlow) : null,
+      pb: safe(marketCap, equity),
+      ps: safe(marketCap, revenue),
+      evToEbitda: safe(ev, ebitda),
+      evToRevenue: safe(ev, revenue),
+      pegRatio: null,
+      priceToFcf: fcf && fcf > 0 ? safe(marketCap, fcf) : null,
       earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
       // Quality & Growth
-      roe: safeRatio(netIncome, equity),
-      roa: safeRatio(netIncome, assets),
-      roic: operatingIncome !== null && totalDebt !== null && equity !== null ? safeRatio(operatingIncome, totalDebt + equity) : null,
-      grossMargin: safeRatio(grossProfit, revenue),
-      operatingMargin: safeRatio(operatingIncome, revenue),
-      netMargin: safeRatio(netIncome, revenue),
-      revenueGrowth: growthFromSeries(fundamentals?.timeseries, "trailingTotalRevenue"),
-      epsGrowth: growthFromSeries(fundamentals?.timeseries, "trailingDilutedEPS"),
-      fcfGrowth: growthFromSeries(fundamentals?.timeseries, "trailingFreeCashFlow"),
-      // Balance Sheet & Dividends
-      debtToEquity: safeRatio(totalDebt, equity),
-      currentRatio: safeRatio(currentAssets, currentLiabilities),
-      quickRatio: currentAssets !== null && currentLiabilities !== null ? safeRatio(currentAssets - (inventory ?? 0), currentLiabilities) : null,
-      interestCoverage: operatingIncome !== null && interestExpense ? safeRatio(operatingIncome, Math.abs(interestExpense)) : null,
-      dividendYield: marketCap && dividendsPaid ? safeRatio(Math.abs(dividendsPaid), marketCap) : null,
-      payoutRatio,
-      fcfYield: freeCashFlow ? safeRatio(freeCashFlow, marketCap) : null,
+      roe: safe(netIncome, equity),
+      roa: safe(netIncome, assets),
+      roic: operatingIncome !== null && equity !== null ? safe(operatingIncome, equity + totalDebt) : null,
+      grossMargin: safe(grossProfit, revenue),
+      operatingMargin: safe(operatingIncome, revenue),
+      netMargin: safe(netIncome, revenue),
+      revenueGrowth: growth(revenue, val(revPrior)),
+      epsGrowth: growth(eps, val(epsPrior)),
+      fcfGrowth: growth(fcf, fcfPrior),
+      // Balance & Dividends
+      debtToEquity: safe(totalDebt, equity),
+      currentRatio: safe(currentAssets, currentLiab),
+      quickRatio: currentAssets !== null && currentLiab ? safe(currentAssets - inventory, currentLiab) : null,
+      interestCoverage: operatingIncome !== null && interestExp ? safe(operatingIncome, Math.abs(interestExp)) : null,
+      dividendYield: marketCap && dividends ? safe(Math.abs(dividends), marketCap) : null,
+      payoutRatio: netIncome && dividends ? safe(Math.abs(dividends), netIncome) : null,
+      fcfYield: fcf ? safe(fcf, marketCap) : null,
       beta: null,
+      // diagnostics
+      _source: entry ? "SEC EDGAR + Yahoo" : "Yahoo only",
+      _fiscalYear: revLatest?.fy ?? null,
     };
 
-    return okJson(metrics);
+    return new Response(JSON.stringify(metrics), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (e) {
     console.error("fetch-stock-data error:", e);
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
+      status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
   }
 });
