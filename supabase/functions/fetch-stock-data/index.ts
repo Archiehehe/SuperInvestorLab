@@ -10,6 +10,30 @@ const YAHOO_HEADERS = {
   "Accept": "application/json",
 };
 
+const FUNDAMENTAL_TYPES = [
+  "annualMarketCap",
+  "trailingPeRatio",
+  "trailingPegRatio",
+  "trailingTotalRevenue",
+  "trailingNetIncome",
+  "trailingGrossProfit",
+  "trailingOperatingIncome",
+  "trailingFreeCashFlow",
+  "trailingEBITDA",
+  "trailingDilutedEPS",
+  "trailingInterestExpense",
+  "trailingCashDividendsPaid",
+  "quarterlyDilutedAverageShares",
+  "quarterlyTotalDebt",
+  "quarterlyLongTermDebt",
+  "quarterlyStockholdersEquity",
+  "quarterlyTotalAssets",
+  "quarterlyCurrentAssets",
+  "quarterlyCurrentLiabilities",
+  "quarterlyCashAndCashEquivalents",
+  "quarterlyInventory",
+].join(",");
+
 function toNumber(value: any): number | null {
   const raw = typeof value === "object" && value !== null && "raw" in value ? value.raw : value;
   if (raw === undefined || raw === null || raw === "") return null;
@@ -36,6 +60,72 @@ function normalizeTicker(input: string): string {
   return input.trim().toUpperCase().replace(/\./g, "-");
 }
 
+function displayTicker(input: string, normalized: string): string {
+  return input.includes(".") ? input.trim().toUpperCase() : normalized.replace(/-/g, ".");
+}
+
+function okJson(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
+async function fetchJson(url: string): Promise<any | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 9000);
+  try {
+    const res = await fetch(url, { headers: YAHOO_HEADERS, signal: controller.signal });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (e) {
+    console.warn("stock data provider request failed:", e);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function latestReported(timeseries: any, type: string): number | null {
+  const rows = timeseries?.result;
+  if (!Array.isArray(rows)) return null;
+  const row = rows.find((item: any) => item?.meta?.type?.includes(type));
+  const values = row?.[type];
+  if (!Array.isArray(values)) return null;
+  for (let i = values.length - 1; i >= 0; i--) {
+    const raw = values[i]?.reportedValue?.raw;
+    const n = toNumber(raw);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function growthFromSeries(timeseries: any, type: string): number | null {
+  const rows = timeseries?.result;
+  if (!Array.isArray(rows)) return null;
+  const row = rows.find((item: any) => item?.meta?.type?.includes(type));
+  const values = Array.isArray(row?.[type]) ? row[type] : [];
+  const valid = values
+    .map((v: any) => ({ date: v?.asOfDate ? Date.parse(v.asOfDate) : 0, value: toNumber(v?.reportedValue?.raw) }))
+    .filter((v: any) => v.value !== null && v.value !== 0)
+    .sort((a: any, b: any) => a.date - b.date);
+  if (valid.length < 2) return null;
+  const latest = valid[valid.length - 1];
+  const targetDate = latest.date - 31536000000;
+  let prior = valid[0];
+  for (const item of valid) {
+    if (item.date <= targetDate) prior = item;
+  }
+  const latestValue = latest.value as number;
+  const priorValue = prior.value as number;
+  if (!priorValue) return null;
+  return Number(((latestValue - priorValue) / Math.abs(priorValue)).toFixed(4));
+}
+
+function safeRatio(numerator: number | null, denominator: number | null): number | null {
+  if (numerator === null || denominator === null || denominator === 0) return null;
+  return Number((numerator / denominator).toFixed(4));
+}
+
 function buildLogoUrl(website: string | null): string | null {
   if (!website) return null;
   try {
@@ -59,88 +149,87 @@ serve(async (req) => {
     }
 
     const ticker = normalizeTicker(rawTicker);
-    const modules = [
-      "price",
-      "summaryDetail",
-      "summaryProfile",
-      "defaultKeyStatistics",
-      "financialData",
-    ].join(",");
+    const chartUrl = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?range=1d&interval=1d`;
+    const chartData = await fetchJson(chartUrl);
+    const meta = chartData?.chart?.result?.[0]?.meta;
 
-    const url = `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=${modules}`;
-
-    const res = await fetch(url, { headers: YAHOO_HEADERS });
-    const data = await res.json();
-
-    const yahooError = data?.quoteSummary?.error;
-    if (yahooError) {
+    if (!meta?.symbol || !toNumber(meta.regularMarketPrice)) {
       return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found` }), {
         status: 404,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const profile = data?.quoteSummary?.result?.[0];
-    if (!profile?.price?.symbol) {
-      return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found` }), {
-        status: 404,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    const now = Math.floor(Date.now() / 1000);
+    const fiveYearsAgo = now - 60 * 60 * 24 * 365 * 5;
+    const fundamentalsUrl = `https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(ticker)}?type=${FUNDAMENTAL_TYPES}&period1=${fiveYearsAgo}&period2=${now}`;
+    const fundamentals = await fetchJson(fundamentalsUrl);
 
-    const price = profile.price ?? {};
-    const summaryDetail = profile.summaryDetail ?? {};
-    const summaryProfile = profile.summaryProfile ?? {};
-    const keyStats = profile.defaultKeyStatistics ?? {};
-    const financial = profile.financialData ?? {};
-
-    const marketCap = toNumber(price.marketCap);
-    const freeCashFlow = toNumber(financial.freeCashflow);
-    const pe = toNumber(summaryDetail.trailingPE);
+    const currentPrice = toNumber(meta.regularMarketPrice) ?? 0;
+    const shares = latestReported(fundamentals?.timeseries, "quarterlyDilutedAverageShares");
+    const annualMarketCap = latestReported(fundamentals?.timeseries, "annualMarketCap");
+    const marketCap = annualMarketCap ?? (shares && currentPrice ? Number((shares * currentPrice).toFixed(2)) : null);
+    const revenue = latestReported(fundamentals?.timeseries, "trailingTotalRevenue");
+    const netIncome = latestReported(fundamentals?.timeseries, "trailingNetIncome");
+    const grossProfit = latestReported(fundamentals?.timeseries, "trailingGrossProfit");
+    const operatingIncome = latestReported(fundamentals?.timeseries, "trailingOperatingIncome");
+    const freeCashFlow = latestReported(fundamentals?.timeseries, "trailingFreeCashFlow");
+    const ebitda = latestReported(fundamentals?.timeseries, "trailingEBITDA");
+    const eps = latestReported(fundamentals?.timeseries, "trailingDilutedEPS");
+    const interestExpense = latestReported(fundamentals?.timeseries, "trailingInterestExpense");
+    const dividendsPaid = latestReported(fundamentals?.timeseries, "trailingCashDividendsPaid");
+    const totalDebt = latestReported(fundamentals?.timeseries, "quarterlyTotalDebt");
+    const equity = latestReported(fundamentals?.timeseries, "quarterlyStockholdersEquity");
+    const assets = latestReported(fundamentals?.timeseries, "quarterlyTotalAssets");
+    const currentAssets = latestReported(fundamentals?.timeseries, "quarterlyCurrentAssets");
+    const currentLiabilities = latestReported(fundamentals?.timeseries, "quarterlyCurrentLiabilities");
+    const cash = latestReported(fundamentals?.timeseries, "quarterlyCashAndCashEquivalents");
+    const inventory = latestReported(fundamentals?.timeseries, "quarterlyInventory");
+    const enterpriseValue = marketCap && totalDebt !== null && cash !== null ? marketCap + totalDebt - cash : null;
+    const pe = latestReported(fundamentals?.timeseries, "trailingPeRatio") ?? (eps && currentPrice ? safeRatio(currentPrice, eps) : null);
+    const payoutRatio = netIncome && dividendsPaid ? safeRatio(Math.abs(dividendsPaid), netIncome) : null;
 
     const metrics = {
-      ticker: toStringValue(price.symbol) ?? ticker,
-      companyName: toStringValue(price.longName) ?? toStringValue(price.shortName) ?? rawTicker.toUpperCase(),
-      price: toNumber(price.regularMarketPrice),
+      ticker: displayTicker(rawTicker, toStringValue(meta.symbol) ?? ticker),
+      companyName: toStringValue(meta.longName) ?? toStringValue(meta.shortName) ?? rawTicker.toUpperCase(),
+      price: currentPrice,
       marketCap,
-      sector: toStringValue(summaryProfile.sector) ?? "N/A",
-      industry: toStringValue(summaryProfile.industry) ?? "N/A",
-      exchange: toStringValue(price.exchangeName) ?? toStringValue(price.fullExchangeName) ?? "N/A",
-      logo: buildLogoUrl(toStringValue(summaryProfile.website)),
+      sector: "N/A",
+      industry: toStringValue(meta.instrumentType) ?? "Equity",
+      exchange: toStringValue(meta.fullExchangeName) ?? toStringValue(meta.exchangeName) ?? "N/A",
+      logo: null,
       // Valuation
       pe,
-      forwardPe: toNumber(summaryDetail.forwardPE),
-      pb: toNumber(keyStats.priceToBook),
-      ps: toNumber(summaryDetail.priceToSalesTrailing12Months),
-      evToEbitda: toNumber(keyStats.enterpriseToEbitda),
-      evToRevenue: toNumber(keyStats.enterpriseToRevenue),
-      pegRatio: toNumber(keyStats.pegRatio),
-      priceToFcf: marketCap && freeCashFlow && freeCashFlow > 0 ? Number((marketCap / freeCashFlow).toFixed(4)) : null,
+      forwardPe: null,
+      pb: safeRatio(marketCap, equity),
+      ps: safeRatio(marketCap, revenue),
+      evToEbitda: safeRatio(enterpriseValue, ebitda),
+      evToRevenue: safeRatio(enterpriseValue, revenue),
+      pegRatio: latestReported(fundamentals?.timeseries, "trailingPegRatio"),
+      priceToFcf: freeCashFlow && freeCashFlow > 0 ? safeRatio(marketCap, freeCashFlow) : null,
       earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
       // Quality & Growth
-      roe: toNumber(financial.returnOnEquity),
-      roa: toNumber(financial.returnOnAssets),
-      roic: null,
-      grossMargin: toNumber(financial.grossMargins),
-      operatingMargin: toNumber(financial.operatingMargins),
-      netMargin: toNumber(financial.profitMargins),
-      revenueGrowth: toNumber(financial.revenueGrowth),
-      epsGrowth: toNumber(financial.earningsGrowth),
-      fcfGrowth: null,
+      roe: safeRatio(netIncome, equity),
+      roa: safeRatio(netIncome, assets),
+      roic: operatingIncome !== null && totalDebt !== null && equity !== null ? safeRatio(operatingIncome, totalDebt + equity) : null,
+      grossMargin: safeRatio(grossProfit, revenue),
+      operatingMargin: safeRatio(operatingIncome, revenue),
+      netMargin: safeRatio(netIncome, revenue),
+      revenueGrowth: growthFromSeries(fundamentals?.timeseries, "trailingTotalRevenue"),
+      epsGrowth: growthFromSeries(fundamentals?.timeseries, "trailingDilutedEPS"),
+      fcfGrowth: growthFromSeries(fundamentals?.timeseries, "trailingFreeCashFlow"),
       // Balance Sheet & Dividends
-      debtToEquity: normalizeDebtToEquity(financial.debtToEquity),
-      currentRatio: toNumber(financial.currentRatio),
-      quickRatio: toNumber(financial.quickRatio),
-      interestCoverage: null,
-      dividendYield: toNumber(summaryDetail.dividendYield),
-      payoutRatio: toNumber(keyStats.payoutRatio),
-      fcfYield: marketCap && freeCashFlow ? Number((freeCashFlow / marketCap).toFixed(4)) : null,
-      beta: toNumber(keyStats.beta),
+      debtToEquity: safeRatio(totalDebt, equity),
+      currentRatio: safeRatio(currentAssets, currentLiabilities),
+      quickRatio: currentAssets !== null && currentLiabilities !== null ? safeRatio(currentAssets - (inventory ?? 0), currentLiabilities) : null,
+      interestCoverage: operatingIncome !== null && interestExpense ? safeRatio(operatingIncome, Math.abs(interestExpense)) : null,
+      dividendYield: marketCap && dividendsPaid ? safeRatio(Math.abs(dividendsPaid), marketCap) : null,
+      payoutRatio,
+      fcfYield: freeCashFlow ? safeRatio(freeCashFlow, marketCap) : null,
+      beta: null,
     };
 
-    return new Response(JSON.stringify(metrics), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    return okJson(metrics);
   } catch (e) {
     console.error("fetch-stock-data error:", e);
     return new Response(JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }), {
