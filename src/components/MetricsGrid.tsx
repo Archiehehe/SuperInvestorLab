@@ -83,6 +83,11 @@ const columns = [
 export function MetricsGrid({ metrics }: MetricsGridProps) {
   return (
     <div className="space-y-6">
+      {metrics.diagnostics?.isTtm === false && (
+        <div className="text-xs text-amber-400/70 bg-amber-500/5 border border-amber-500/10 rounded-lg px-4 py-2">
+          Income-statement metrics are based on the latest annual filing (FY{metrics.diagnostics.fiscalYear}), not current TTM. Some ratios may differ from real-time sources.
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {columns.map((col) => (
           <Card key={col.title} className="bg-card border-border">

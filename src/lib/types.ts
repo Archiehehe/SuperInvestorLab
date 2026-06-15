@@ -36,6 +36,12 @@ export interface StockMetrics {
   payoutRatio: number | null;
   fcfYield: number | null;
   beta: number | null;
+  diagnostics?: {
+    source: string;
+    period: string;
+    fiscalYear: number | null;
+    isTtm: boolean;
+  };
 }
 
 export type Signal = "pass" | "warn" | "fail";

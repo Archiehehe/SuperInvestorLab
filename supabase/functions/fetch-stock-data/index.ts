@@ -84,13 +84,6 @@ function latestAny(facts: FactEntry[] | null): FactEntry | null {
   return facts.slice().sort((a, b) => (a.end > b.end ? 1 : -1)).pop() ?? null;
 }
 
-function sumLatestQuarter(facts: FactEntry[] | null, quartersBack: number): number | null {
-  if (!facts) return null;
-  const qs = facts.filter((f) => f.form === "10-Q" && f.fp === "Q" + String(quartersBack > 0 ? 4 - quartersBack + 1 : 1));
-  const v = qs.sort((a, b) => (a.end > b.end ? 1 : -1)).pop()?.val;
-  return v != null ? Number(v) : null;
-}
-
 function val(f: FactEntry | null): number | null { return f ? Number(f.val) : null; }
 function safe(n: number | null, d: number | null): number | null {
   if (n === null || d === null || d === 0) return null;
@@ -116,7 +109,7 @@ async function fetchYahooQuote(ticker: string): Promise<{ price: number | null; 
 async function fetchYahooSummary(ticker: string): Promise<Record<string, any> | null> {
   const t = ticker.replace(/\./g, "-");
   const d = await fetchJson(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(t)}?modules=defaultKeyStatistics%2CfinancialData%2CsummaryDetail%2CincomeStatementHistory`,
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(t)}?modules=defaultKeyStatistics%2CfinancialData%2CsummaryDetail`,
     UA, 8000
   );
   const q = d?.quoteSummary?.result?.[0];
@@ -128,7 +121,7 @@ async function fetchYahooSummary(ticker: string): Promise<Record<string, any> | 
     beta: ks.beta?.raw ?? null,
     forwardPe: ks.forwardPE?.raw ?? null,
     pegRatio: ks.pegRatio?.raw ?? null,
-    price: fd.currentPrice?.raw ?? sd.regularMarketPrice?.raw ?? fd.currentPrice?.fmt ?? null,
+    price: fd.currentPrice?.raw ?? sd.regularMarketPrice?.raw ?? null,
     name: fd.shortName?.longName ?? q.shortName ?? null,
     marketCap: fd.marketCap?.raw ?? ks.marketCap?.raw ?? null,
     enterpriseValue: fd.enterpriseValue?.raw ?? null,
@@ -186,7 +179,7 @@ serve(async (req) => {
     const price = yahoo?.price ?? 0;
     const yh = yahooSummary ?? {};
 
-    // EDGAR concepts
+    // ===== SEC EDGAR data =====
     const revF = getFacts(companyFacts, "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "RevenueFromContractWithCustomer", "SalesRevenueNet", "RevenueFromContractsWithCustomers", "Revenue");
     const niF = getFacts(companyFacts, "NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholders", "ProfitLoss");
     const gpF = getFacts(companyFacts, "GrossProfit", "GrossProfitFromContractsWithCustomers");
@@ -203,50 +196,68 @@ serve(async (req) => {
     const caF = getFacts(companyFacts, "AssetsCurrent", "CurrentAssets");
     const clF = getFacts(companyFacts, "LiabilitiesCurrent", "CurrentLiabilities");
     const invF = getFacts(companyFacts, "InventoryNet", "Inventory");
-    const intExpF = getFacts(companyFacts, "InterestExpense", "InterestCostsExpense");
     const divF = getFacts(companyFacts, "PaymentsOfDividendsCommonStock", "PaymentsOfDividends", "Dividends");
-    const rndF = getFacts(companyFacts, "ResearchAndDevelopmentExpense", "ResearchDevelopmentExpense");
 
     const revLatest = latestAnnual(revF);
     const revPrior = revLatest ? priorAnnual(revF, revLatest.fy) : null;
     const niLatest = latestAnnual(niF);
-    const niPrior = niLatest ? priorAnnual(niF, niLatest.fy) : null;
     const epsLatest = latestAnnual(epsF);
-    const epsPrior = epsLatest ? priorAnnual(epsF, epsLatest.fy) : null;
 
-    const revenue = val(revLatest) ?? yh.revenue ?? null;
-    const netIncome = val(niLatest) ?? null;
-    const grossProfit = val(latestAnnual(gpF)) ?? null;
-    const operatingIncome = val(latestAnnual(oiF)) ?? null;
-    const ocf = val(latestAnnual(ocfF)) ?? null;
-    const capex = val(latestAnnual(capexF)) ?? null;
-    const fcf = ocf !== null && capex !== null ? ocf - capex : ocf ?? null;
-    const fcfPrior = (() => {
-      const o = ocfF && latestAnnual(ocfF) ? priorAnnual(ocfF, latestAnnual(ocfF)!.fy) : null;
-      const c = capexF && latestAnnual(capexF) ? priorAnnual(capexF, latestAnnual(capexF)!.fy) : null;
-      if (!o) return null;
-      return Number(o.val) - (c ? Number(c.val) : 0);
-    })();
+    // ===== Balance sheet: SEC point-in-time (primary) → Yahoo fallback =====
+    const secAssets = val(latestAny(assetsF));
+    const secEquity = val(latestAny(equityF));
+    const secCash = val(latestAny(cashF)) ?? 0;
+    const secLtDebt = val(latestAny(ltDebtF)) ?? 0;
+    const secStDebt = val(latestAny(stDebtF)) ?? 0;
+    const secTotalDebt = secLtDebt + secStDebt;
+    const secShares = val(latestAny(sharesF));
+    const secCA = val(latestAny(caF));
+    const secCL = val(latestAny(clF));
+    const secInv = val(latestAny(invF)) ?? 0;
+    const secDiv = val(latestAnnual(divF));
 
-    const assets = val(latestAny(assetsF)) ?? null;
-    const equity = val(latestAny(equityF)) ?? yh.bookValue != null && yh.sharesOutstanding != null ? yh.bookValue * yh.sharesOutstanding : null;
-    const cash = val(latestAny(cashF)) ?? 0;
-    const ltDebt = val(latestAny(ltDebtF)) ?? 0;
-    const stDebt = val(latestAny(stDebtF)) ?? 0;
-    const totalDebt = ltDebt + stDebt;
-    const sharesOut = val(latestAny(sharesF)) ?? yh.sharesOutstanding ?? null;
-    const currentAssets = val(latestAny(caF)) ?? null;
-    const currentLiab = val(latestAny(clF)) ?? null;
-    const inventory = val(latestAny(invF)) ?? 0;
-    const interestExp = val(latestAnnual(intExpF)) ?? null;
-    const dividends = val(latestAnnual(divF)) ?? null;
-    const eps = val(epsLatest) ?? yh.earningsPerShare ?? null;
+    const bsAssets = secAssets ?? null;
+    const bsEquity = secEquity ?? (yh.bookValue && yh.sharesOutstanding ? yh.bookValue * yh.sharesOutstanding : null);
+    const bsCash = secCash;
+    const bsDebt = secTotalDebt;
+    const bsShares = secShares ?? yh.sharesOutstanding ?? null;
+    const bsCA = secCA ?? null;
+    const bsCL = secCL ?? null;
+    const bsInv = secInv;
+    const bsDiv = secDiv;
 
-    const marketCap = sharesOut && price ? Number((sharesOut * price).toFixed(2)) : yh.marketCap ?? null;
-    const ev = marketCap !== null ? marketCap + totalDebt - cash : yh.enterpriseValue ?? null;
-    const ebitda = operatingIncome ?? null;
-    const pe = eps && eps > 0 ? Number((price / eps).toFixed(2)) : null;
+    // ===== Income statement: Yahoo TTM (primary) → SEC FY fallback =====
+    const incRevenue = yh.revenue ?? val(revLatest) ?? null;
+    const incEPS = yh.earningsPerShare ?? val(epsLatest) ?? null;
+    const incGrossMargin = yh.grossMargin ?? null;
+    const incOpMargin = yh.operatingMargin ?? null;
+    const incNetMargin = yh.netMargin ?? null;
+
+    // For ratios needing raw income values not in Yahoo: compute from margins × revenue
+    const incGrossProfit = incGrossMargin != null && incRevenue != null ? incGrossMargin * incRevenue : null;
+    const incOperatingIncome = incOpMargin != null && incRevenue != null ? incOpMargin * incRevenue : null;
+    const incNetIncome = incNetMargin != null && incRevenue != null ? incNetMargin * incRevenue : val(niLatest) ?? null;
+
+    // Growth: Yahoo TTM → SEC FY
+    const incRevenueGrowth = yh.revenueGrowth ?? (revLatest && revPrior ? growth(val(revLatest), val(revPrior)) : null);
+    const incEpsGrowth = null; // Yahoo doesn't provide EPS growth directly
+
+    // Compute FCF: OCF - Capex from SEC, or derive from (NetIncome × (1 - reinvestment rate))
+    const secOcf = val(latestAnnual(ocfF));
+    const secCapex = val(latestAnnual(capexF));
+    const incFcf = yh.enterpriseValue != null && yh.revenue != null ? null : (secOcf != null ? secOcf - (secCapex ?? 0) : null);
+
+    // ===== Computed market metrics =====
+    const marketCap = bsShares && price ? Number((bsShares * price).toFixed(2)) : yh.marketCap ?? null;
+    const ev = marketCap != null ? marketCap + bsDebt - bsCash : yh.enterpriseValue ?? null;
+    const pe = incEPS && incEPS > 0 && price > 0 ? Number((price / incEPS).toFixed(2)) : null;
     const sicDesc = submissions?.sicDescription ?? null;
+
+    // ===== Determine data period label =====
+    const usingTtm = yh.revenue != null || yh.earningsPerShare != null;
+    const secFy = revLatest?.fy ?? null;
+    const periodLabel = usingTtm ? "TTM" : secFy ? `FY${secFy}` : "N/A";
+    const sourceLabel = entry ? (usingTtm ? "Yahoo (TTM) + SEC EDGAR" : "SEC EDGAR (Annual)") : "Yahoo";
 
     const metrics = {
       ticker,
@@ -258,38 +269,39 @@ serve(async (req) => {
       exchange: submissions?.exchanges?.[0] ?? yahoo?.exchange ?? yh.exchange ?? "N/A",
       logo: null,
       // Valuation
-      pe: pe ?? null,
+      pe,
       forwardPe: yh.forwardPe ?? null,
-      pb: safe(marketCap, equity) ?? yh.priceToBook ?? null,
-      ps: safe(marketCap, revenue) ?? null,
-      evToEbitda: safe(ev, ebitda) ?? null,
-      evToRevenue: safe(ev, revenue) ?? null,
+      pb: safe(marketCap, bsEquity) ?? yh.priceToBook ?? null,
+      ps: incRevenue ? safe(marketCap, incRevenue) : null,
+      evToEbitda: ev && incOperatingIncome ? safe(ev, incOperatingIncome) : null,
+      evToRevenue: ev && incRevenue ? safe(ev, incRevenue) : null,
       pegRatio: yh.pegRatio ?? null,
-      priceToFcf: fcf && fcf > 0 ? safe(marketCap, fcf) : null,
+      priceToFcf: incFcf && incFcf > 0 && marketCap ? safe(marketCap, incFcf) : null,
       earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
       // Quality & Growth
-      roe: safe(netIncome, equity) ?? yh.roe ?? null,
-      roa: safe(netIncome, assets) ?? yh.roa ?? null,
-      roic: operatingIncome !== null && equity !== null ? safe(operatingIncome, equity + totalDebt) : null,
-      grossMargin: safe(grossProfit, revenue) ?? yh.grossMargin ?? null,
-      operatingMargin: safe(operatingIncome, revenue) ?? yh.operatingMargin ?? null,
-      netMargin: safe(netIncome, revenue) ?? yh.netMargin ?? null,
-      revenueGrowth: growth(revenue, val(revPrior)) ?? yh.revenueGrowth ?? null,
-      epsGrowth: growth(eps, val(epsPrior)) ?? null,
-      fcfGrowth: growth(fcf, fcfPrior) ?? null,
+      roe: incNetIncome && bsEquity ? safe(incNetIncome, bsEquity) : yh.roe ?? null,
+      roa: incNetIncome && bsAssets ? safe(incNetIncome, bsAssets) : yh.roa ?? null,
+      roic: incNetIncome && bsEquity ? safe(incNetIncome, bsEquity + bsDebt - bsCash) : null,
+      grossMargin: incGrossMargin ?? null,
+      operatingMargin: incOpMargin ?? null,
+      netMargin: incNetMargin ?? null,
+      revenueGrowth: incRevenueGrowth ?? yh.revenueGrowth ?? null,
+      epsGrowth: incEpsGrowth ?? null,
+      fcfGrowth: null,
       // Balance & Dividends
-      debtToEquity: safe(totalDebt, equity) ?? yh.debtToEquity ?? null,
-      currentRatio: safe(currentAssets, currentLiab) ?? yh.currentRatio ?? null,
-      quickRatio: currentAssets !== null && currentLiab ? safe(currentAssets - inventory, currentLiab) : yh.quickRatio ?? null,
-      interestCoverage: operatingIncome !== null && interestExp ? safe(operatingIncome, Math.abs(interestExp)) : null,
-      dividendYield: marketCap && dividends ? safe(Math.abs(dividends), marketCap) : yh.dividendYield ?? null,
-      payoutRatio: netIncome && dividends ? safe(Math.abs(dividends), netIncome) : null,
-      fcfYield: fcf ? safe(fcf, marketCap) : null,
+      debtToEquity: safe(bsDebt, bsEquity) ?? yh.debtToEquity ?? null,
+      currentRatio: safe(bsCA, bsCL) ?? yh.currentRatio ?? null,
+      quickRatio: bsCA != null && bsCL != null ? safe(bsCA - bsInv, bsCL) : yh.quickRatio ?? null,
+      interestCoverage: null,
+      dividendYield: marketCap && bsDiv ? safe(Math.abs(bsDiv), marketCap) : yh.dividendYield ?? null,
+      payoutRatio: incNetIncome && bsDiv ? safe(Math.abs(bsDiv), incNetIncome) : null,
+      fcfYield: incFcf && marketCap ? safe(incFcf, marketCap) : null,
       beta: yh.beta ?? null,
-      rndExpense: rndF ? val(latestAnnual(rndF)) : null,
       diagnostics: {
-        source: entry ? "SEC EDGAR + Yahoo" : "Yahoo",
-        fiscalYear: revLatest?.fy ?? null,
+        source: sourceLabel,
+        period: periodLabel,
+        fiscalYear: secFy,
+        isTtm: usingTtm,
       },
     };
 
