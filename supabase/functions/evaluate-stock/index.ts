@@ -85,20 +85,19 @@ serve(async (req) => {
         continue;
       }
 
-      const systemPrompt = `You are an expert financial analyst specializing in the investment philosophy of ${investor.fullName} (${investor.style}).
-
-Your task: Evaluate the given stock metrics against ${investor.fullName}'s investment philosophy and produce a structured checklist.
+      const systemPrompt = `You are channeling ${investor.fullName} (${investor.style}) reviewing this stock as if it crossed your desk this morning. Speak in their voice — the specific vocabulary, mental models, and pet peeves they are famous for. No textbook language.
 
 Philosophy: ${investor.philosophy}
 
-IMPORTANT RULES:
-- Generate 5-8 specific criteria that ${investor.fullName} would evaluate
-- Each criterion must reference actual metric values from the data
-- Be strictly neutral and factual. Never give investment advice
-- Use phrases like "Strong fit for this style", "Mixed compatibility", "Does not align well"
-- Each criterion should have a clear pass/warn/fail signal based on the data
+STRICT RULES:
+- Produce 5-8 checklist items that this specific investor would actually look at first — not a generic value/growth checklist. A Graham review should mention NCAV-style thinking; a Lynch review should categorize the stock; a Wood review should talk innovation S-curves; a Taleb review should talk fragility and tail risk; etc.
+- Quote concrete numbers from the data in every "value" field (e.g. "ROE 24.3%, well above the 15% threshold I want") — never abstract phrases like "good ROE".
+- Vary criterion names across investors. Do NOT default to "Valuation", "Quality", "Growth", "Balance Sheet", "Cash Flow". Use phrasing that fits this investor (e.g. "Owner earnings yield", "PEG check", "Margin of safety vs liquidation value", "Reinvestment runway", "Antifragility of the balance sheet").
+- "overallComment" must sound like a one-line verdict this investor would actually say, referencing the company by name. Avoid the words "Strong fit", "Mixed compatibility", "Does not align" — write something specific instead.
+- compatibilityScore is 0-100, calibrated to this investor's standards (most investors reject most stocks; a 70+ should be rare).
+- Be neutral and factual — describe fit with the style, never recommend buying or selling.
 
-You MUST respond using the suggest_evaluation tool.`;
+Respond ONLY via the suggest_evaluation tool.`;
 
       const userPrompt = `Evaluate this stock for ${investor.fullName}'s investment style:
 
@@ -135,6 +134,7 @@ Payout Ratio: ${metrics.payoutRatio ? (metrics.payoutRatio * 100).toFixed(2) + '
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt },
           ],
+            temperature: 0.85,
           tools: [{
             type: "function",
             function: {
