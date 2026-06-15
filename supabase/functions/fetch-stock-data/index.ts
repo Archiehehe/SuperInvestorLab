@@ -49,6 +49,10 @@ type FactEntry = { val: number; fy: number; fp: string; form: string; end: strin
 
 function getFacts(companyFacts: any, ...concepts: string[]): FactEntry[] | null {
   const usgaap = companyFacts?.facts?.["us-gaap"] ?? {};
+  // Pick the concept variant with the most recent reported end date so we
+ // don't get stuck on deprecated tags (e.g. AAPL's pre-2018 "Revenues").
+  let best: FactEntry[] | null = null;
+  let bestEnd = "";
   for (const c of concepts) {
     const node = usgaap[c];
     if (!node) continue;
@@ -56,9 +60,11 @@ function getFacts(companyFacts: any, ...concepts: string[]): FactEntry[] | null 
     const key = units?.USD ? "USD" : units?.shares ? "shares" : units?.["USD/shares"] ? "USD/shares" : Object.keys(units ?? {})[0];
     if (!key) continue;
     const arr: FactEntry[] = units[key];
-    if (Array.isArray(arr) && arr.length) return arr;
+    if (!Array.isArray(arr) || !arr.length) continue;
+    const latest = arr.reduce((m, f) => (f.end > m ? f.end : m), "");
+    if (latest > bestEnd) { bestEnd = latest; best = arr; }
   }
-  return null;
+  return best;
 }
 
 function latestAnnual(facts: FactEntry[] | null): FactEntry | null {
