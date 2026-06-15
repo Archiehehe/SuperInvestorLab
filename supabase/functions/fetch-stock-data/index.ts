@@ -113,17 +113,45 @@ async function fetchYahooQuote(ticker: string): Promise<{ price: number | null; 
   };
 }
 
-async function fetchFinnhubMetrics(ticker: string): Promise<Record<string, any> | null> {
-  const key = Deno.env.get("FINNHUB_KEY");
-  if (!key) return null;
-  const d = await fetchJson(`https://finnhub.io/api/v1/stock/metric?symbol=${ticker}&metric=all&token=${key}`, UA, 4000);
-  return d?.metric || null;
-}
-
-async function fetchFinnhubProfile(ticker: string): Promise<Record<string, any> | null> {
-  const key = Deno.env.get("FINNHUB_KEY");
-  if (!key) return null;
-  return await fetchJson(`https://finnhub.io/api/v1/stock/profile2?symbol=${ticker}&token=${key}`, UA, 4000);
+async function fetchYahooSummary(ticker: string): Promise<Record<string, any> | null> {
+  const t = ticker.replace(/\./g, "-");
+  const d = await fetchJson(
+    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(t)}?modules=defaultKeyStatistics%2CfinancialData%2CsummaryDetail%2CincomeStatementHistory`,
+    UA, 8000
+  );
+  const q = d?.quoteSummary?.result?.[0];
+  if (!q) return null;
+  const ks = q.defaultKeyStatistics ?? {};
+  const fd = q.financialData ?? {};
+  const sd = q.summaryDetail ?? {};
+  return {
+    beta: ks.beta?.raw ?? null,
+    forwardPe: ks.forwardPE?.raw ?? null,
+    pegRatio: ks.pegRatio?.raw ?? null,
+    price: fd.currentPrice?.raw ?? sd.regularMarketPrice?.raw ?? fd.currentPrice?.fmt ?? null,
+    name: fd.shortName?.longName ?? q.shortName ?? null,
+    marketCap: fd.marketCap?.raw ?? ks.marketCap?.raw ?? null,
+    enterpriseValue: fd.enterpriseValue?.raw ?? null,
+    revenue: fd.totalRevenue?.raw ?? null,
+    revenueGrowth: fd.revenueGrowth?.raw ?? null,
+    grossMargin: fd.grossMargins?.raw ?? null,
+    operatingMargin: fd.operatingMargins?.raw ?? null,
+    netMargin: fd.profitMargins?.raw ?? null,
+    roe: fd.returnOnEquity?.raw ?? null,
+    roa: fd.returnOnAssets?.raw ?? null,
+    debtToEquity: fd.debtToEquity?.raw ?? sd.debtToEquity?.raw ?? null,
+    currentRatio: fd.currentRatio?.raw ?? sd.currentRatio?.raw ?? null,
+    quickRatio: fd.quickRatio?.raw ?? sd.quickRatio?.raw ?? null,
+    dividendYield: sd.dividendYield?.raw ?? fd.dividendYield?.raw ?? null,
+    earningsPerShare: fd.earningsPerShare?.raw ?? ks.earningsPerShare?.raw ?? null,
+    forwardEps: ks.forwardEps?.raw ?? null,
+    sharesOutstanding: ks.sharesOutstanding?.raw ?? null,
+    bookValue: ks.bookValue?.raw ?? null,
+    priceToBook: ks.priceToBook?.raw ?? fd.priceToBook?.raw ?? null,
+    sector: sd.sector ?? fd.sector ?? null,
+    industry: sd.industry ?? fd.industry ?? null,
+    exchange: sd.fullExchangeName ?? q.exchange ?? null,
+  };
 }
 
 serve(async (req) => {
@@ -140,21 +168,23 @@ serve(async (req) => {
     const tickerMap = await loadTickerMap();
     const entry = tickerMap[ticker] ?? tickerMap[lookupKey] ?? tickerMap[ticker.replace(/\./g, "")];
 
-    const [yahoo, submissions, companyFacts, finnhubMetric, finnhubProfile] = await Promise.all([
+    const [yahooChart, submissions, companyFacts, yahooSummary] = await Promise.all([
       fetchYahooQuote(ticker),
       entry ? fetchJson(`https://data.sec.gov/submissions/CIK${entry.cik}.json`, UA) : Promise.resolve(null),
       entry ? fetchJson(`https://data.sec.gov/api/xbrl/companyfacts/CIK${entry.cik}.json`, UA) : Promise.resolve(null),
-      fetchFinnhubMetrics(ticker),
-      fetchFinnhubProfile(ticker),
+      fetchYahooSummary(ticker),
     ]);
 
-    if (!entry && !yahoo.price && !finnhubMetric) {
+    const yahoo = yahooChart.price ? yahooChart : yahooSummary;
+
+    if (!entry && !yahoo?.price) {
       return new Response(JSON.stringify({ error: `Ticker "${rawTicker}" not found in any data source` }), {
         status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
-    const price = yahoo.price ?? finnhubProfile?.tp ?? finnhubMetric?.["52WeekHigh"] ?? 0;
+    const price = yahoo?.price ?? 0;
+    const yh = yahooSummary ?? {};
 
     // EDGAR concepts
     const revF = getFacts(companyFacts, "Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax", "RevenueFromContractWithCustomer", "SalesRevenueNet", "RevenueFromContractsWithCustomers", "Revenue");
@@ -184,13 +214,13 @@ serve(async (req) => {
     const epsLatest = latestAnnual(epsF);
     const epsPrior = epsLatest ? priorAnnual(epsF, epsLatest.fy) : null;
 
-    const revenue = val(revLatest) ?? finnhubMetric?.revenueTTM ?? null;
-    const netIncome = val(niLatest) ?? finnhubMetric?.netIncomeTTM ?? null;
+    const revenue = val(revLatest) ?? yh.revenue ?? null;
+    const netIncome = val(niLatest) ?? null;
     const grossProfit = val(latestAnnual(gpF)) ?? null;
     const operatingIncome = val(latestAnnual(oiF)) ?? null;
     const ocf = val(latestAnnual(ocfF)) ?? null;
     const capex = val(latestAnnual(capexF)) ?? null;
-    const fcf = ocf !== null && capex !== null ? ocf - capex : ocf ?? finnhubMetric?.freeCashFlowTTM ?? null;
+    const fcf = ocf !== null && capex !== null ? ocf - capex : ocf ?? null;
     const fcfPrior = (() => {
       const o = ocfF && latestAnnual(ocfF) ? priorAnnual(ocfF, latestAnnual(ocfF)!.fy) : null;
       const c = capexF && latestAnnual(capexF) ? priorAnnual(capexF, latestAnnual(capexF)!.fy) : null;
@@ -199,66 +229,66 @@ serve(async (req) => {
     })();
 
     const assets = val(latestAny(assetsF)) ?? null;
-    const equity = val(latestAny(equityF)) ?? finnhubMetric?.equityTTM ?? null;
+    const equity = val(latestAny(equityF)) ?? yh.bookValue != null && yh.sharesOutstanding != null ? yh.bookValue * yh.sharesOutstanding : null;
     const cash = val(latestAny(cashF)) ?? 0;
-    const ltDebt = val(latestAny(ltDebtF)) ?? finnhubMetric?.longTermDebtTTM ?? 0;
+    const ltDebt = val(latestAny(ltDebtF)) ?? 0;
     const stDebt = val(latestAny(stDebtF)) ?? 0;
     const totalDebt = ltDebt + stDebt;
-    const sharesOut = val(latestAny(sharesF)) ?? finnhubMetric?.sharesOutstanding ?? null;
-    const currentAssets = val(latestAny(caF)) ?? finnhubMetric?.currentAssetsTTM ?? null;
-    const currentLiab = val(latestAny(clF)) ?? finnhubMetric?.currentLiabilitiesTTM ?? null;
+    const sharesOut = val(latestAny(sharesF)) ?? yh.sharesOutstanding ?? null;
+    const currentAssets = val(latestAny(caF)) ?? null;
+    const currentLiab = val(latestAny(clF)) ?? null;
     const inventory = val(latestAny(invF)) ?? 0;
     const interestExp = val(latestAnnual(intExpF)) ?? null;
     const dividends = val(latestAnnual(divF)) ?? null;
-    const eps = val(epsLatest) ?? finnhubMetric?.epsTTM ?? null;
+    const eps = val(epsLatest) ?? yh.earningsPerShare ?? null;
 
-    const marketCap = sharesOut && price ? Number((sharesOut * price).toFixed(2)) : finnhubMetric?.marketCapitalization ?? null;
-    const ev = marketCap !== null ? marketCap + totalDebt - cash : null;
-    const ebitda = operatingIncome ?? finnhubMetric?.ebitdaTTM ?? null;
+    const marketCap = sharesOut && price ? Number((sharesOut * price).toFixed(2)) : yh.marketCap ?? null;
+    const ev = marketCap !== null ? marketCap + totalDebt - cash : yh.enterpriseValue ?? null;
+    const ebitda = operatingIncome ?? null;
     const pe = eps && eps > 0 ? Number((price / eps).toFixed(2)) : null;
     const sicDesc = submissions?.sicDescription ?? null;
 
     const metrics = {
       ticker,
-      companyName: entry?.name ?? yahoo.name ?? finnhubProfile?.name ?? ticker,
+      companyName: entry?.name ?? yahoo?.name ?? yh.name ?? ticker,
       price,
       marketCap,
-      sector: sicDesc ?? finnhubProfile?.sector ?? "N/A",
-      industry: sicDesc ?? finnhubProfile?.industry ?? "N/A",
-      exchange: submissions?.exchanges?.[0] ?? yahoo.exchange ?? "N/A",
+      sector: sicDesc ?? yh.sector ?? "N/A",
+      industry: sicDesc ?? yh.industry ?? "N/A",
+      exchange: submissions?.exchanges?.[0] ?? yahoo?.exchange ?? yh.exchange ?? "N/A",
       logo: null,
       // Valuation
-      pe: pe ?? finnhubMetric?.peTTM ?? null,
-      forwardPe: finnhubMetric?.forwardPE ?? null,
-      pb: safe(marketCap, equity) ?? finnhubMetric?.priceBookTTM ?? null,
-      ps: safe(marketCap, revenue) ?? finnhubMetric?.priceSalesTTM ?? null,
-      evToEbitda: safe(ev, ebitda) ?? finnhubMetric?.evEBITDATTM ?? null,
-      evToRevenue: safe(ev, revenue) ?? finnhubMetric?.evRevenueTTM ?? null,
-      pegRatio: finnhubMetric?.pegRatio ?? null,
+      pe: pe ?? null,
+      forwardPe: yh.forwardPe ?? null,
+      pb: safe(marketCap, equity) ?? yh.priceToBook ?? null,
+      ps: safe(marketCap, revenue) ?? null,
+      evToEbitda: safe(ev, ebitda) ?? null,
+      evToRevenue: safe(ev, revenue) ?? null,
+      pegRatio: yh.pegRatio ?? null,
       priceToFcf: fcf && fcf > 0 ? safe(marketCap, fcf) : null,
       earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
       // Quality & Growth
-      roe: safe(netIncome, equity) ?? finnhubMetric?.roeTTM ?? null,
-      roa: safe(netIncome, assets) ?? finnhubMetric?.returnOnAssetsTTM ?? null,
-      roic: operatingIncome !== null && equity !== null ? safe(operatingIncome, equity + totalDebt) : finnhubMetric?.returnOnInvestedCapitalTTM ?? null,
-      grossMargin: safe(grossProfit, revenue) ?? finnhubMetric?.grossMarginTTM ?? null,
-      operatingMargin: safe(operatingIncome, revenue) ?? finnhubMetric?.operatingMarginTTM ?? null,
-      netMargin: safe(netIncome, revenue) ?? finnhubMetric?.netProfitMarginTTM ?? null,
-      revenueGrowth: growth(revenue, val(revPrior)) ?? finnhubMetric?.revenueGrowthTTM ?? null,
-      epsGrowth: growth(eps, val(epsPrior)) ?? finnhubMetric?.earningsGrowthTTM ?? null,
+      roe: safe(netIncome, equity) ?? yh.roe ?? null,
+      roa: safe(netIncome, assets) ?? yh.roa ?? null,
+      roic: operatingIncome !== null && equity !== null ? safe(operatingIncome, equity + totalDebt) : null,
+      grossMargin: safe(grossProfit, revenue) ?? yh.grossMargin ?? null,
+      operatingMargin: safe(operatingIncome, revenue) ?? yh.operatingMargin ?? null,
+      netMargin: safe(netIncome, revenue) ?? yh.netMargin ?? null,
+      revenueGrowth: growth(revenue, val(revPrior)) ?? yh.revenueGrowth ?? null,
+      epsGrowth: growth(eps, val(epsPrior)) ?? null,
       fcfGrowth: growth(fcf, fcfPrior) ?? null,
       // Balance & Dividends
-      debtToEquity: safe(totalDebt, equity) ?? finnhubMetric?.debtToEquityTTM ?? null,
-      currentRatio: safe(currentAssets, currentLiab) ?? finnhubMetric?.currentRatioTTM ?? null,
-      quickRatio: currentAssets !== null && currentLiab ? safe(currentAssets - inventory, currentLiab) : finnhubMetric?.quickRatioTTM ?? null,
+      debtToEquity: safe(totalDebt, equity) ?? yh.debtToEquity ?? null,
+      currentRatio: safe(currentAssets, currentLiab) ?? yh.currentRatio ?? null,
+      quickRatio: currentAssets !== null && currentLiab ? safe(currentAssets - inventory, currentLiab) : yh.quickRatio ?? null,
       interestCoverage: operatingIncome !== null && interestExp ? safe(operatingIncome, Math.abs(interestExp)) : null,
-      dividendYield: marketCap && dividends ? safe(Math.abs(dividends), marketCap) : finnhubMetric?.dividendYieldIndicatedAnnual ?? null,
+      dividendYield: marketCap && dividends ? safe(Math.abs(dividends), marketCap) : yh.dividendYield ?? null,
       payoutRatio: netIncome && dividends ? safe(Math.abs(dividends), netIncome) : null,
-      fcfYield: fcf ? safe(fcf, marketCap) : finnhubMetric?.freeCashFlowYieldTTM ?? null,
-      beta: finnhubMetric?.beta ?? null,
+      fcfYield: fcf ? safe(fcf, marketCap) : null,
+      beta: yh.beta ?? null,
       rndExpense: rndF ? val(latestAnnual(rndF)) : null,
       diagnostics: {
-        source: entry ? (finnhubMetric ? "SEC EDGAR + Finnhub + Yahoo" : "SEC EDGAR + Yahoo") : "Finnhub + Yahoo",
+        source: entry ? "SEC EDGAR + Yahoo" : "Yahoo",
         fiscalYear: revLatest?.fy ?? null,
       },
     };
