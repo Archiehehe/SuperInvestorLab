@@ -40,7 +40,7 @@ export function SingleStockTab() {
     const cached = getCachedResult(cacheKey);
     if (cached) {
       setResult(cached);
-      toast({ title: "Loaded from cache", description: "Showing cached results. Results are refreshed hourly." });
+      toast({ title: "Loaded from cache", description: "Showing cached results. Refreshed every 5 min." });
       return;
     }
 
@@ -51,7 +51,7 @@ export function SingleStockTab() {
       setStage("Fetching financial data...");
       const metrics = await fetchStockData(ticker);
 
-      setStage(`Evaluating ${selectedInvestors.length} investor profiles with AI...`);
+      setStage(`Evaluating ${selectedInvestors.length} investor profiles...`);
       const investors = selectedInvestors.map((id) => INVESTORS.find((i) => i.id === id)!);
       const evaluations = await evaluateStock(metrics, investors);
 
