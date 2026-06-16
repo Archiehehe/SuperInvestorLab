@@ -55,8 +55,8 @@ async function finnhub(t: string) {
 async function fmp(t: string) {
   if (!FMP_KEY) return {}
   const [profile, ratios] = await Promise.all([
-    jsonFetch(`https://financialmodelingprep.com/api/v3/profile/${t}?apikey=${FMP_KEY}`, 6000),
-    jsonFetch(`https://financialmodelingprep.com/api/v3/ratios/${t}?apikey=${FMP_KEY}`, 6000),
+    jsonFetch(`https://financialmodelingprep.com/stable/profile?symbol=${t}&apikey=${FMP_KEY}`, 6000),
+    jsonFetch(`https://financialmodelingprep.com/stable/ratios?symbol=${t}&apikey=${FMP_KEY}&limit=1`, 6000),
   ])
   const p = Array.isArray(profile) ? profile[0] : null
   const r = Array.isArray(ratios) ? ratios[0] : null
@@ -134,15 +134,14 @@ export default async function handler(req: Request) {
 
   const yc = ych, ys = ysum ?? {}, fm = fh.metric ?? {}, fhQ = fh.quote, fhP = fh.profile
   const fmpP = fmpData.profile, fmpR = fmpData.ratios
-  const av = av
 
   const price = fill(yc?.price, fhQ?.c, fmpP?.price, td?.price, fmpP?.priceAvg, av?.AnalystTargetPrice ? parseFloat(av.AnalystTargetPrice) : null) ?? null
   const shares = fill(ys.sharesOut, fm.sharesOutstanding, fmpP?.sharesOutstanding, av?.SharesOutstanding ? parseInt(av.SharesOutstanding) : null) ?? null
   const marketCap = fill(yc?.marketCap, ys.marketCap, fhP?.marketCapitalization, fmpP?.marketCap, shares && price ? shares * price : null, av?.MarketCapitalization ? parseFloat(av.MarketCapitalization) : null) ?? null
 
   // Compute PE from price/eps if possible, else use pre-computed PE from any source
-  const epsVal = fill(ys.eps, fm.epsTTM, fmpR?.eps, av?.EPS ? parseFloat(av.EPS) : null, sec?.netIncome && shares ? sec.netIncome / shares : null) ?? null
-  const pe = fill(epsVal && epsVal > 0 && price ? price / epsVal : null, fm.peTTM, fmpR?.priceEarningsRatioPE, av?.PERatio ? parseFloat(av.PERatio) : null) ?? null
+  const epsVal = fill(ys.eps, fm.epsTTM, fmpR?.netIncomePerShare, av?.EPS ? parseFloat(av.EPS) : null, sec?.netIncome && shares ? sec.netIncome / shares : null) ?? null
+  const pe = fill(epsVal && epsVal > 0 && price ? price / epsVal : null, fm.peTTM, fmpR?.priceToEarningsRatio, av?.PERatio ? parseFloat(av.PERatio) : null) ?? null
 
   // Compute PS from revenue/marketCap
   const rev = fill(ys.revenue, fmpP?.revenue, fm.revenue, av?.RevenueTTM ? parseFloat(av.RevenueTTM) : null, sec?.revenue) ?? null
@@ -167,44 +166,32 @@ export default async function handler(req: Request) {
     forwardPe: fill(ys.forwardPe, fm.forwardPE, av?.ForwardPE ? parseFloat(av.ForwardPE) : null) ?? null,
     pb: fill(ys.priceToBook, fm.priceBookTTM, fmpR?.priceToBookRatio, av?.PriceToBookRatio ? parseFloat(av.PriceToBookRatio) : null) ?? null,
     ps: fill(psComp, fm.priceSalesTTM, fmpR?.priceToSalesRatio, av?.PriceToSalesRatioTTM ? parseFloat(av.PriceToSalesRatioTTM) : null) ?? null,
-    evToEbitda: fill(fm.evEBITDATTM, fmpR?.enterpriseValueOverEBITDA, av?.EVToEBITDA ? parseFloat(av.EVToEBITDA) : null) ?? null,
+    evToEbitda: fill(fm.evEBITDATTM, fmpR?.enterpriseValueMultiple, av?.EVToEBITDA ? parseFloat(av.EVToEBITDA) : null) ?? null,
     evToRevenue: fill(fm.evRevenueTTM, fmpP?.evToRevenue) ?? null,
-    pegRatio: fill(ys.pegRatio, fm.pegRatio, fmpR?.pegRatio, av?.PEGRatio ? parseFloat(av.PEGRatio) : null) ?? null,
-    priceToFcf: fill(fmpR?.priceToFreeCashFlowsCashFlowPerShare, null) ?? null,
+    pegRatio: fill(ys.pegRatio, fm.pegRatio, fmpR?.priceToEarningsGrowthRatio, av?.PEGRatio ? parseFloat(av.PEGRatio) : null) ?? null,
+    priceToFcf: fill(fmpR?.priceToFreeCashFlowRatio, null) ?? null,
     earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
 
-    roe: fill(pct(ys.roe), pct(fm.roeTTM), fmpR?.returnOnEquity, av?.ReturnOnEquityTTM ? pct(parseFloat(av.ReturnOnEquityTTM)) : null, sec?.netIncome && secEq && secEq > 0 ? sec.netIncome / secEq : null) ?? null,
-    roa: fill(pct(ys.roa), pct(fm.returnOnAssetsTTM), fmpR?.returnOnAssets, av?.ReturnOnAssetsTTM ? pct(parseFloat(av.ReturnOnAssetsTTM)) : null) ?? null,
-    roic: fill(fmpR?.returnOnCapitalEmployed, av?.ReturnOnCapitalEmployed ? pct(parseFloat(av.ReturnOnCapitalEmployed)) : null) ?? null,
-    grossMargin: fill(pct(ys.grossMargin), pct(fm.grossMarginTTM), fmpR?.grossProfitMargin, av?.GrossProfitTTM && av?.RevenueTTM ? parseFloat(av.GrossProfitTTM) / parseFloat(av.RevenueTTM) : null, sec?.revenue && sec?.fcf ? null : null) ?? null,
-    operatingMargin: fill(pct(ys.operatingMargin), pct(fm.operatingMarginTTM), fmpR?.operatingProfitMargin, av?.OperatingMarginTTM ? pct(parseFloat(av.OperatingMarginTTM)) : null) ?? null,
-    netMargin: fill(pct(ys.netMargin), pct(fm.netProfitMarginTTM), fmpR?.netProfitMargin, av?.ProfitMargin ? pct(parseFloat(av.ProfitMargin)) : null) ?? null,
-    revenueGrowth: fill(pct(ys.revenueGrowth), pct(fm.revenueGrowthTTM), fmpR?.revenueGrowth, fmpR?.revenueGrowthTTM ? pct(fmpR.revenueGrowthTTM) : null, av?.RevenueGrowth ? pct(parseFloat(av.RevenueGrowth)) : null) ?? null,
-    epsGrowth: fill(fmpR?.epsGrowth, av?.EPSGrowth ? pct(parseFloat(av.EPSGrowth)) : null) ?? null,
+    roe: fill(pct(ys.roe), pct(fm.roeTTM), fmpR?.returnOnEquity, av?.ReturnOnEquityTTM ? parseFloat(av.ReturnOnEquityTTM) : null, sec?.netIncome && secEq && secEq > 0 ? sec.netIncome / secEq : null) ?? null,
+    roa: fill(pct(ys.roa), pct(fm.returnOnAssetsTTM), fmpR?.returnOnAssets, av?.ReturnOnAssetsTTM ? parseFloat(av.ReturnOnAssetsTTM) : null) ?? null,
+    roic: fill(fmpR?.returnOnCapitalEmployed, av?.ReturnOnCapitalEmployed ? parseFloat(av.ReturnOnCapitalEmployed) : null) ?? null,
+    grossMargin: fill(pct(ys.grossMargin), pct(fm.grossMarginTTM), fmpR?.grossProfitMargin, av?.GrossProfitTTM && av?.RevenueTTM ? parseFloat(av.GrossProfitTTM) / parseFloat(av.RevenueTTM) : null) ?? null,
+    operatingMargin: fill(pct(ys.operatingMargin), pct(fm.operatingMarginTTM), fmpR?.operatingProfitMargin, av?.OperatingMarginTTM ? parseFloat(av.OperatingMarginTTM) : null) ?? null,
+    netMargin: fill(pct(ys.netMargin), pct(fm.netProfitMarginTTM), fmpR?.netProfitMargin, av?.ProfitMargin ? parseFloat(av.ProfitMargin) : null) ?? null,
+    revenueGrowth: fill(pct(ys.revenueGrowth), pct(fm.revenueGrowthTTM), av?.QuarterlyRevenueGrowthYOY ? parseFloat(av.QuarterlyRevenueGrowthYOY) : null) ?? null,
+    epsGrowth: fill(av?.QuarterlyEarningsGrowthYOY ? parseFloat(av.QuarterlyEarningsGrowthYOY) : null) ?? null,
     fcfGrowth: fill(fmpR?.freeCashFlowGrowth, null) ?? null,
 
-    debtToEquity: fill(fmpR?.debtToEquity, fm.debtToEquityTTM, ys.debtToEquity, av?.DebtToEquityTTM ? parseFloat(av.DebtToEquityTTM) : null, secDte) ?? null,
+    debtToEquity: fill(fmpR?.debtToEquityRatio, fm.debtToEquityTTM, ys.debtToEquity, av?.DebtToEquityTTM ? parseFloat(av.DebtToEquityTTM) : null, secDte) ?? null,
     currentRatio: fill(fmpR?.currentRatio, fm.currentRatioTTM, ys.currentRatio, av?.CurrentRatioTTM ? parseFloat(av.CurrentRatioTTM) : null, secCr) ?? null,
     quickRatio: fill(fmpR?.quickRatio, fm.quickRatioTTM, ys.quickRatio, av?.QuickRatioTTM ? parseFloat(av.QuickRatioTTM) : null) ?? null,
-    interestCoverage: fill(fmpR?.interestCoverage, av?.InterestCoverage ? parseFloat(av.InterestCoverage) : null) ?? null,
-    dividendYield: fill(pct(ys.dividendYield), pct(fm.dividendYieldIndicatedAnnual), fmpR?.dividendYield, av?.DividendYield ? pct(parseFloat(av.DividendYield)) : null) ?? null,
-    payoutRatio: fill(fmpR?.payoutRatio, av?.PayoutRatio ? pct(parseFloat(av.PayoutRatio)) : null) ?? null,
-    fcfYield: fill(fmpR?.freeCashFlowYield, marketCap && sec?.fcf && sec.fcf !== 0 ? sec.fcf / marketCap : null) ?? null,
+    interestCoverage: fill(fmpR?.interestCoverageRatio, av?.InterestCoverage ? parseFloat(av.InterestCoverage) : null) ?? null,
+    dividendYield: fill(pct(ys.dividendYield), pct(fm.dividendYieldIndicatedAnnual), fmpR?.dividendYield, av?.DividendYield ? parseFloat(av.DividendYield) : null) ?? null,
+    payoutRatio: fill(fmpR?.dividendPayoutRatio, av?.PayoutRatio ? parseFloat(av.PayoutRatio) : null) ?? null,
+    fcfYield: fill(marketCap && sec?.fcf && sec.fcf !== 0 ? sec.fcf / marketCap : null) ?? null,
 
     beta: fill(ys.beta, fm.beta, fmpP?.beta, av?.Beta ? parseFloat(av.Beta) : null) ?? null,
-    diagnostics: { source: yc || ysum ? 'Yahoo Finance' : fhP ? 'Finnhub' : 'Multiple', period: 'TTM', fiscalYear: null, isTtm: true },
-    _debug: {
-      env: { fmp: !!FMP_KEY, av: !!ALPHA_KEY, twelve: !!TWELVE_KEY, finnhub: !!FINNHUB_KEY },
-      yahoo: !!yc,
-      yahooSummary: !!ysum,
-      finnhubQuote: !!fhQ,
-      finnhubProfile: !!fhP,
-      fmpProfile: !!fmpP,
-      fmpRatios: !!fmpR,
-      alphaVantage: !!av,
-      twelve: !!td,
-      secEdgar: !!sec,
-    },
+    diagnostics: { source: yc || ysum ? 'Yahoo Finance' : fhP ? 'Finnhub' : fmpP ? 'FMP' : 'Multiple', period: 'TTM', fiscalYear: null, isTtm: true },
   }
 
   const corsHeaders = { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-cache, no-store, must-revalidate' }
