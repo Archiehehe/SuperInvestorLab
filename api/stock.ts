@@ -10,6 +10,8 @@ async function jsonFetch(url: string, timeoutMs = 8000) {
   } catch { return null }
 }
 
+const pct = (v: number | null | undefined) => v != null && !isNaN(v) ? v / 100 : null
+
 export default async function handler(req: Request) {
   const url = new URL(req.url)
   const ticker = url.searchParams.get('ticker')?.toUpperCase()
@@ -38,9 +40,9 @@ export default async function handler(req: Request) {
     companyName: profile?.name ?? ticker,
     price,
     marketCap: marketCap ?? null,
-    sector: profile?.sector ?? 'N/A',
-    industry: profile?.industry ?? 'N/A',
-    exchange: profile?.exchange ?? 'N/A',
+    sector: profile?.finnhubIndustry ?? null,
+    industry: null,
+    exchange: profile?.exchange ?? null,
     logo: profile?.logo ?? null,
     pe,
     forwardPe: metric.forwardPE ?? null,
@@ -51,22 +53,22 @@ export default async function handler(req: Request) {
     pegRatio: metric.pegRatio ?? null,
     priceToFcf: metric.salesPerShareTTM ?? null,
     earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
-    roe: metric.roeTTM ?? null,
-    roa: metric.returnOnAssetsTTM ?? null,
+    roe: pct(metric.roeTTM),
+    roa: pct(metric.returnOnAssetsTTM),
     roic: null,
-    grossMargin: metric.grossMarginTTM ?? null,
-    operatingMargin: metric.operatingMarginTTM ?? null,
-    netMargin: metric.netProfitMarginTTM ?? null,
-    revenueGrowth: metric.revenueGrowthTTM ?? null,
+    grossMargin: pct(metric.grossMarginTTM),
+    operatingMargin: pct(metric.operatingMarginTTM),
+    netMargin: pct(metric.netProfitMarginTTM),
+    revenueGrowth: pct(metric.revenueGrowthTTM),
     epsGrowth: null,
     fcfGrowth: null,
     debtToEquity: metric.debtToEquityTTM ?? null,
     currentRatio: metric.currentRatioTTM ?? null,
     quickRatio: metric.quickRatioTTM ?? null,
     interestCoverage: null,
-    dividendYield: metric.dividendYieldIndicatedAnnual ?? null,
+    dividendYield: pct(metric.dividendYieldIndicatedAnnual),
     payoutRatio: null,
-    fcfYield: metric.freeCashFlowYieldTTM ?? null,
+    fcfYield: pct(metric.freeCashFlowYieldTTM),
     beta: metric.beta ?? null,
     diagnostics: { source: 'Finnhub', period: 'TTM', fiscalYear: null, isTtm: true },
   }
