@@ -1,7 +1,7 @@
 import type { StockMetrics } from "@/lib/types";
 import { formatMetricValue } from "@/lib/formatters";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Building2, TrendingUp } from "lucide-react";
+import { Card, CardContent } from "@/components/ui/card";
+import { Building2 } from "lucide-react";
 
 interface CompanyHeaderProps {
   metrics: StockMetrics;
@@ -12,14 +12,6 @@ export function CompanyHeader({ metrics }: CompanyHeaderProps) {
     <Card className="bg-card border-border">
       <CardContent className="p-6">
         <div className="flex items-start gap-6">
-          {metrics.logo && (
-            <img
-              src={metrics.logo}
-              alt={metrics.companyName}
-              className="h-14 w-14 rounded-lg bg-secondary p-1 object-contain"
-              onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-            />
-          )}
           <div className="flex-1 min-w-0 space-y-3">
             <div>
               <div className="flex items-center gap-3">
