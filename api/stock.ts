@@ -137,7 +137,7 @@ export default async function handler(req: Request) {
 
   const price = fill(yc?.price, fhQ?.c, fmpP?.price, td?.price, fmpP?.priceAvg, av?.AnalystTargetPrice ? parseFloat(av.AnalystTargetPrice) : null) ?? null
   const shares = fill(ys.sharesOut, fm.sharesOutstanding, fmpP?.sharesOutstanding, av?.SharesOutstanding ? parseInt(av.SharesOutstanding) : null) ?? null
-  const marketCap = fill(yc?.marketCap, ys.marketCap, fhP?.marketCapitalization, fmpP?.marketCap, shares && price ? shares * price : null, av?.MarketCapitalization ? parseFloat(av.MarketCapitalization) : null) ?? null
+  const marketCap = fill(ys.marketCap, fhP?.marketCapitalization, fmpP?.marketCap, shares && price ? shares * price : null, av?.MarketCapitalization ? parseFloat(av.MarketCapitalization) : null, yc?.marketCap) ?? null
 
   // Compute PE from price/eps if possible, else use pre-computed PE from any source
   const epsVal = fill(ys.eps, fm.epsTTM, fmpR?.netIncomePerShare, av?.EPS ? parseFloat(av.EPS) : null, sec?.netIncome && shares ? sec.netIncome / shares : null) ?? null
@@ -165,7 +165,7 @@ export default async function handler(req: Request) {
     pe,
     forwardPe: fill(ys.forwardPe, fm.forwardPE, av?.ForwardPE ? parseFloat(av.ForwardPE) : null) ?? null,
     pb: fill(ys.priceToBook, fm.priceBookTTM, fmpR?.priceToBookRatio, av?.PriceToBookRatio ? parseFloat(av.PriceToBookRatio) : null) ?? null,
-    ps: fill(psComp, fm.priceSalesTTM, fmpR?.priceToSalesRatio, av?.PriceToSalesRatioTTM ? parseFloat(av.PriceToSalesRatioTTM) : null) ?? null,
+    ps: fill(fm.priceSalesTTM, fmpR?.priceToSalesRatio, av?.PriceToSalesRatioTTM ? parseFloat(av.PriceToSalesRatioTTM) : null, psComp) ?? null,
     evToEbitda: fill(fm.evEBITDATTM, fmpR?.enterpriseValueMultiple, av?.EVToEBITDA ? parseFloat(av.EVToEBITDA) : null) ?? null,
     evToRevenue: fill(fm.evRevenueTTM, fmpP?.evToRevenue) ?? null,
     pegRatio: fill(ys.pegRatio, fm.pegRatio, fmpR?.priceToEarningsGrowthRatio, av?.PEGRatio ? parseFloat(av.PEGRatio) : null) ?? null,
