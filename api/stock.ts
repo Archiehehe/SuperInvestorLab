@@ -193,6 +193,18 @@ export default async function handler(req: Request) {
 
     beta: fill(ys.beta, fm.beta, fmpP?.beta, av?.Beta ? parseFloat(av.Beta) : null) ?? null,
     diagnostics: { source: yc || ysum ? 'Yahoo Finance' : fhP ? 'Finnhub' : 'Multiple', period: 'TTM', fiscalYear: null, isTtm: true },
+    _debug: {
+      env: { fmp: !!FMP_KEY, av: !!ALPHA_KEY, twelve: !!TWELVE_KEY, finnhub: !!FINNHUB_KEY },
+      yahoo: !!yc,
+      yahooSummary: !!ysum,
+      finnhubQuote: !!fhQ,
+      finnhubProfile: !!fhP,
+      fmpProfile: !!fmpP,
+      fmpRatios: !!fmpR,
+      alphaVantage: !!av,
+      twelve: !!td,
+      secEdgar: !!sec,
+    },
   }
 
   const corsHeaders = { 'content-type': 'application/json', 'access-control-allow-origin': '*', 'cache-control': 'no-cache, no-store, must-revalidate' }
