@@ -6,7 +6,7 @@ import { CompanyHeader } from "@/components/CompanyHeader";
 import { MetricsGrid } from "@/components/MetricsGrid";
 import { InvestorResults } from "@/components/InvestorResults";
 import { INVESTORS, DEFAULT_INVESTORS } from "@/lib/investors";
-import { fetchStockData, evaluateStock, getCachedResult, setCachedResult } from "@/lib/api";
+import { fetchStockData, evaluateStock } from "@/lib/api";
 import { exportToJSON, exportToCSV } from "@/lib/formatters";
 import type { AnalysisResult } from "@/lib/types";
 import { Loader2, Download, Search } from "lucide-react";
@@ -36,14 +36,6 @@ export function SingleStockTab() {
       return;
     }
 
-    const cacheKey = `${ticker}_${selectedInvestors.sort().join(",")}`;
-    const cached = getCachedResult(cacheKey);
-    if (cached) {
-      setResult(cached);
-      toast({ title: "Loaded from cache", description: "Showing cached results. Refreshed every 5 min." });
-      return;
-    }
-
     setLoading(true);
     setResult(null);
 
@@ -61,7 +53,6 @@ export function SingleStockTab() {
         timestamp: new Date().toISOString(),
       };
 
-      setCachedResult(cacheKey, analysisResult);
       setResult(analysisResult);
     } catch (err: any) {
       toast({
