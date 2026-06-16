@@ -1,133 +1,16 @@
 import type { StockMetrics, InvestorEvaluation } from "./types";
 import type { Investor } from "./investors";
 
-const UA = "SuperInvestorLab/1.0";
 const CACHE_PREFIX = "sil_cache_";
 const CACHE_TTL = 1000 * 60 * 5;
 
-async function fetchJson(url: string, timeoutMs = 8000): Promise<any | null> {
-  const c = new AbortController();
-  const t = setTimeout(() => c.abort(), timeoutMs);
-  try {
-    const r = await fetch(url, { signal: c.signal, headers: { "User-Agent": UA } });
-    if (!r.ok) return null;
-    return await r.json();
-  } catch { return null }
-  finally { clearTimeout(t) }
-}
-
-async function fetchYahooChart(ticker: string) {
-  const t = ticker.replace(/\./g, "-");
-  const d = await fetchJson(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}?range=1d&interval=1d`);
-  const m = d?.chart?.result?.[0]?.meta;
-  if (!m) return { price: null, name: null, exchange: null };
-  return {
-    price: typeof m.regularMarketPrice === "number" ? m.regularMarketPrice : null,
-    name: m.longName ?? m.shortName ?? null,
-    exchange: m.fullExchangeName ?? m.exchangeName ?? null,
-  };
-}
-
-async function fetchYahooSummary(ticker: string) {
-  const t = ticker.replace(/\./g, "-");
-  const d = await fetchJson(
-    `https://query1.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(t)}?modules=defaultKeyStatistics%2CfinancialData%2CsummaryDetail`,
-    10000
-  );
-  const q = d?.quoteSummary?.result?.[0];
-  if (!q) return null;
-  const ks = q.defaultKeyStatistics ?? {};
-  const fd = q.financialData ?? {};
-  const sd = q.summaryDetail ?? {};
-  return {
-    beta: ks.beta?.raw ?? null,
-    forwardPe: ks.forwardPE?.raw ?? null,
-    pegRatio: ks.pegRatio?.raw ?? null,
-    price: fd.currentPrice?.raw ?? sd.regularMarketPrice?.raw ?? null,
-    name: fd.shortName?.longName ?? q.shortName ?? null,
-    marketCap: fd.marketCap?.raw ?? ks.marketCap?.raw ?? null,
-    enterpriseValue: fd.enterpriseValue?.raw ?? null,
-    revenue: fd.totalRevenue?.raw ?? null,
-    revenueGrowth: fd.revenueGrowth?.raw ?? null,
-    grossMargin: fd.grossMargins?.raw ?? null,
-    operatingMargin: fd.operatingMargins?.raw ?? null,
-    netMargin: fd.profitMargins?.raw ?? null,
-    roe: fd.returnOnEquity?.raw ?? null,
-    roa: fd.returnOnAssets?.raw ?? null,
-    debtToEquity: fd.debtToEquity?.raw ?? sd.debtToEquity?.raw ?? null,
-    currentRatio: fd.currentRatio?.raw ?? sd.currentRatio?.raw ?? null,
-    quickRatio: fd.quickRatio?.raw ?? sd.quickRatio?.raw ?? null,
-    dividendYield: sd.dividendYield?.raw ?? fd.dividendYield?.raw ?? null,
-    eps: fd.earningsPerShare?.raw ?? ks.earningsPerShare?.raw ?? null,
-    forwardEps: ks.forwardEps?.raw ?? null,
-    sharesOut: ks.sharesOutstanding?.raw ?? null,
-    bookValue: ks.bookValue?.raw ?? null,
-    priceToBook: ks.priceToBook?.raw ?? fd.priceToBook?.raw ?? null,
-    sector: sd.sector ?? fd.sector ?? null,
-    industry: sd.industry ?? fd.industry ?? null,
-    exchange: sd.fullExchangeName ?? fd.exchange ?? q.exchange ?? null,
-  };
-}
-
 export async function fetchStockData(ticker: string): Promise<StockMetrics> {
-  const [chart, summary] = await Promise.all([
-    fetchYahooChart(ticker),
-    fetchYahooSummary(ticker),
-  ]);
-
-  const yc = chart.price ? chart : null;
-  const yh = summary ?? {};
-
-  const price = yc?.price ?? yh.price ?? 0;
-  if (!price) throw new Error(`No price data for ${ticker}`);
-
-  const shares = yh.sharesOut ?? null;
-  const equity = yh.bookValue != null && shares != null ? yh.bookValue * shares : null;
-  const marketCap = shares && price ? Number((shares * price).toFixed(2)) : yh.marketCap ?? null;
-  const pe = yh.eps && yh.eps > 0 ? Number((price / yh.eps).toFixed(2)) : null;
-
-  return {
-    ticker: ticker.toUpperCase(),
-    companyName: yc?.name ?? yh.name ?? ticker,
-    price,
-    marketCap,
-    sector: yh.sector ?? "N/A",
-    industry: yh.industry ?? "N/A",
-    exchange: yc?.exchange ?? yh.exchange ?? "N/A",
-    logo: null,
-    pe,
-    forwardPe: yh.forwardPe ?? null,
-    pb: yh.priceToBook ?? null,
-    ps: yh.revenue && marketCap ? Number((marketCap / yh.revenue).toFixed(4)) : null,
-    evToEbitda: null,
-    evToRevenue: yh.revenue && yh.enterpriseValue ? Number((yh.enterpriseValue / yh.revenue).toFixed(4)) : null,
-    pegRatio: yh.pegRatio ?? null,
-    priceToFcf: null,
-    earningsYield: pe && pe > 0 ? Number((1 / pe).toFixed(4)) : null,
-    roe: yh.roe ?? null,
-    roa: yh.roa ?? null,
-    roic: null,
-    grossMargin: yh.grossMargin ?? null,
-    operatingMargin: yh.operatingMargin ?? null,
-    netMargin: yh.netMargin ?? null,
-    revenueGrowth: yh.revenueGrowth ?? null,
-    epsGrowth: null,
-    fcfGrowth: null,
-    debtToEquity: yh.debtToEquity ?? null,
-    currentRatio: yh.currentRatio ?? null,
-    quickRatio: yh.quickRatio ?? null,
-    interestCoverage: null,
-    dividendYield: yh.dividendYield ?? null,
-    payoutRatio: null,
-    fcfYield: null,
-    beta: yh.beta ?? null,
-    diagnostics: {
-      source: "Yahoo Finance",
-      period: "TTM",
-      fiscalYear: null,
-      isTtm: true,
-    },
-  };
+  const res = await fetch(`/api/stock?ticker=${encodeURIComponent(ticker)}`, { signal: AbortSignal.timeout(10000) })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    throw new Error(err.error || `HTTP ${res.status}`)
+  }
+  return res.json()
 }
 
 const SP500 = [
@@ -294,30 +177,10 @@ const SP500 = [
   { symbol: "NET", name: "Cloudflare Inc.", sector: "Technology" },
 ];
 
-const YAHOO_SEARCH_UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" };
-
 export async function searchTickers(query: string): Promise<Array<{ symbol: string; name: string; exchange?: string }>> {
-  const cleanQuery = query.trim();
-  if (!cleanQuery) return [];
-  try {
-    const r = await fetch(
-      `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(cleanQuery)}&quotesCount=10&newsCount=0&lang=en-US&region=US`,
-      { headers: YAHOO_SEARCH_UA, signal: AbortSignal.timeout(8000) }
-    );
-    const data = await r.json();
-    const quotes = Array.isArray(data?.quotes) ? data.quotes : [];
-    return quotes
-      .filter((q: any) => q?.symbol && q?.quoteType === "EQUITY")
-      .slice(0, 10)
-      .map((q: any) => ({
-        symbol: String(q.symbol).replace(/-/g, "."),
-        name: q.shortname || q.longname || q.symbol,
-        exchange: q.exchDisp || q.exchange || "US",
-      }));
-  } catch {
-    const q = cleanQuery.toUpperCase();
-    return SP500.filter(s => s.symbol.includes(q) || s.name.toUpperCase().includes(q)).slice(0, 10).map(s => ({ symbol: s.symbol, name: s.name, exchange: "US" }));
-  }
+  const q = query.trim().toUpperCase()
+  if (!q) return []
+  return SP500.filter(s => s.symbol.includes(q) || s.name.toUpperCase().includes(q)).slice(0, 10).map(s => ({ symbol: s.symbol, name: s.name, exchange: 'US' }))
 }
 
 export async function fetchSP500(): Promise<Array<{ symbol: string; name: string; sector: string }>> {
